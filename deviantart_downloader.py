@@ -92,6 +92,10 @@ PAGE_LIMIT = 24  # maximum allowed by the API
 CANCEL = threading.Event()
 
 
+class ApiError(RuntimeError):
+    """The API kept failing after exhausting every retry."""
+
+
 class DeviantArtClient:
     def __init__(self, client_id: str, client_secret: str, token_file: Path = TOKEN_FILE):
         self.client_id = client_id
@@ -171,20 +175,31 @@ class DeviantArtClient:
         self._ensure_token()
 
         url = f"{API_BASE}/{endpoint.lstrip('/')}"
-        for attempt in range(5):
+        max_attempts = 10
+        backoff = 4
+        for attempt in range(max_attempts):
             resp = self.session.get(url, params=params, timeout=30)
             if resp.status_code == 401:
                 self._ensure_token(force=True)
                 continue
             if resp.status_code == 429:
-                wait = 2 ** (attempt + 2)
+                if attempt + 1 == max_attempts:
+                    break
+                retry_after = resp.headers.get("Retry-After", "")
+                wait = int(retry_after) if retry_after.isdigit() else backoff
+                backoff = min(backoff * 2, 300)
                 print(f"  Rate limit reached, waiting {wait} s...")
                 if CANCEL.wait(wait):
                     raise RuntimeError("Cancelled by the user")
                 continue
             resp.raise_for_status()
             return resp.json()
-        raise RuntimeError(f"Too many failed retries for {url}")
+        raise ApiError(
+            f"DeviantArt kept rate-limiting {url} after every retry "
+            "(the block usually clears after a few minutes).\n"
+            "Try again later, and consider lowering DA_WORKERS to 4 or less "
+            "if it keeps happening."
+        )
 
 
 def login(client: DeviantArtClient):
@@ -615,6 +630,8 @@ def run():
 def main():
     try:
         run()
+    except ApiError as e:
+        sys.exit(f"\n{e}")
     except KeyboardInterrupt:
         # Ctrl+C outside the download loop (login, gallery listing, ...)
         print("\nInterrupted by the user.")
