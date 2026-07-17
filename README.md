@@ -5,6 +5,7 @@ Download the full gallery of any DeviantArt profile using the [official public A
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
 - Parallel downloads with retries and API rate-limit handling.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
+- Files you delete manually stay deleted: the download record (`_downloaded.json`) is authoritative, so deleted works are not downloaded again unless you pass `--redownload-missing`.
 - Saves the full metadata of every work to `_metadata.json`.
 
 ## Installation
@@ -43,6 +44,7 @@ deviantart-downloader username --client-id XXX --client-secret YYY
 deviantart-downloader username -o my_folder   # output folder (default: DA_OUTPUT or downloads)
 deviantart-downloader username -w 8           # simultaneous downloads
 deviantart-downloader username --delay 1.0    # pause after each download, per thread
+deviantart-downloader username --redownload-missing  # restore manually deleted files
 ```
 
 Files are saved to `<output>/<username>/`.

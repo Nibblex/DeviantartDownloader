@@ -253,19 +253,24 @@ def download_file(session: requests.Session, url: str, dest: Path) -> bool:
 
 
 def process_deviation(
-    client: DeviantArtClient, dev: dict, out_dir: Path, delay: float, manifest: DownloadManifest
+    client: DeviantArtClient, dev: dict, out_dir: Path, delay: float,
+    manifest: DownloadManifest, redownload_missing: bool = False
 ) -> tuple[str, str]:
     """Resolve the file URL and download it. Returns (status, description)."""
     title = dev.get("title") or "untitled"
     dev_id = dev.get("deviationid", "")
 
     # Duplicate: already downloaded in a previous run (even if the title
-    # has changed since). Checked before calling the API.
+    # has changed since). Checked before calling the API. The manifest is
+    # authoritative: a deleted file is not downloaded again unless
+    # --redownload-missing is passed.
     if dev_id and manifest.has(dev_id):
         existing = manifest.filename_for(dev_id)
         if existing and (out_dir / existing).is_file():
             return "skipped", f"Already exists, skipped: {existing}"
-        # The file was deleted manually: download it again.
+        if not redownload_missing:
+            return "skipped", f"Deleted locally, skipped: {existing or title}"
+        # --redownload-missing: restore the manually deleted file.
 
     # 1) Prefer the original file if the author allows downloading it
     file_url = None
@@ -324,6 +329,10 @@ def main():
     parser.add_argument("-w", "--workers", type=int, default=env_int("DA_WORKERS", 4),
                         help="Simultaneous downloads (default: DA_WORKERS from .env or 4, "
                              "recommended not to exceed 8)")
+    parser.add_argument("--redownload-missing", action="store_true",
+                        help="Download again works recorded in the manifest whose local "
+                             "file is missing (by default, manually deleted files are "
+                             "not downloaded again)")
     args = parser.parse_args()
 
     if args.workers < 1:
@@ -363,7 +372,8 @@ def main():
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(process_deviation, client, dev, out_dir, args.delay, manifest): dev
+            pool.submit(process_deviation, client, dev, out_dir, args.delay, manifest,
+                        args.redownload_missing): dev
             for dev in deviations
         }
         for future in as_completed(futures):
