@@ -3,7 +3,7 @@
 Download the full gallery of any DeviantArt profile using the [official public API](https://www.deviantart.com/developers/).
 
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
-- Can strip the blur filter the API applies to mature-content previews (opt in with `--unblur` or `DA_UNBLUR=true`).
+- Downloads mature content unblurred when you log in with your account (`--login`, see below). Without login, `--unblur`/`DA_UNBLUR=true` strips the blur where possible: works uploaded since ~mid-2021 have their URL token pinned to the blurred version, so for those the blurred preview is downloaded instead.
 - Parallel downloads with retries and API rate-limit handling.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
 - Files you delete manually stay deleted: the download record (`_downloaded.json`) is authoritative, so deleted works are not downloaded again unless you pass `--redownload-missing`.
@@ -53,6 +53,21 @@ deviantart-downloader username --unblur       # strip the blur on mature-content
 ```
 
 Files are saved to `<output>/<username>/`.
+
+## Unblurred mature content (`--login`)
+
+Without a logged-in user, the API serves mature works as an anonymous visitor would see them: blurred, and with the image URL cryptographically pinned to the blurred version for works uploaded since ~mid-2021 (`--unblur` cannot help there). To get the real images, log in with your DeviantArt account:
+
+1. In your account settings, enable **mature content**.
+2. In <https://www.deviantart.com/developers/apps>, edit your application and add `http://127.0.0.1:8721/callback` to the **OAuth2 Redirect URI Whitelist**.
+3. Run:
+
+```bash
+deviantart-downloader --login            # one-time browser authorization
+deviantart-downloader username           # subsequent runs use the saved session
+```
+
+The browser opens once to authorize the app; the session is stored in `~/.config/deviantart-downloader/token.json` and renewed automatically. If it ever expires (about 3 months without use), run `--login` again. While a session is saved, mature works are downloaded unblurred and `--unblur` is unnecessary.
 
 ## License
 

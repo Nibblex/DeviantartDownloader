@@ -15,6 +15,10 @@ Usage:
 
   # or passing the credentials as arguments:
   deviantart-downloader <profile_url> --client-id XXX --client-secret YYY
+
+  # log in with your account so mature works are served unblurred
+  # (requires whitelisting http://127.0.0.1:8721/callback in your app):
+  deviantart-downloader --login
 """
 
 import argparse
@@ -26,7 +30,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, unquote, urlencode, parse_qs
 
 try:
     import requests
@@ -77,43 +81,90 @@ def env_bool(name: str, default: bool) -> bool:
 
 API_BASE = "https://www.deviantart.com/api/v1/oauth2"
 TOKEN_URL = "https://www.deviantart.com/oauth2/token"
+AUTH_URL = "https://www.deviantart.com/oauth2/authorize"
+REDIRECT_PORT = 8721
+REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/callback"
+TOKEN_FILE = Path.home() / ".config" / "deviantart-downloader" / "token.json"
 USER_AGENT = "da-gallery-downloader/1.0"
 PAGE_LIMIT = 24  # maximum allowed by the API
 
+# Set on Ctrl+C so worker threads abort in-progress downloads promptly.
+CANCEL = threading.Event()
+
 
 class DeviantArtClient:
-    def __init__(self, client_id: str, client_secret: str):
+    def __init__(self, client_id: str, client_secret: str, token_file: Path = TOKEN_FILE):
         self.client_id = client_id
         self.client_secret = client_secret
+        self.token_file = token_file
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
         self._token_expiry = 0.0
         self._token_lock = threading.Lock()
+
+    @property
+    def user_mode(self) -> bool:
+        """True when a user session saved by --login will be used."""
+        return self.token_file.is_file()
 
     def _ensure_token(self, force: bool = False):
         with self._token_lock:
             if force or time.time() >= self._token_expiry:
                 self._refresh_token()
 
-    def _refresh_token(self):
+    def _token_request(self, grant: dict, error_hint: str) -> dict:
         resp = self.session.post(
             TOKEN_URL,
             data={
-                "grant_type": "client_credentials",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
+                **grant,
             },
             timeout=30,
         )
         if resp.status_code != 200:
             sys.exit(
                 f"Error obtaining the OAuth token ({resp.status_code}): {resp.text}\n"
-                "Check your client_id and client_secret."
+                + error_hint
             )
-        data = resp.json()
+        return resp.json()
+
+    def _apply_token(self, data: dict):
         self.session.headers["Authorization"] = f"Bearer {data['access_token']}"
         # renew 60 s before it expires (it expires in 1 hour)
         self._token_expiry = time.time() + data.get("expires_in", 3600) - 60
+
+    def _refresh_token(self):
+        if self.user_mode:
+            try:
+                saved = json.loads(self.token_file.read_text(encoding="utf-8"))
+                refresh = saved["refresh_token"]
+            except (OSError, ValueError, KeyError):
+                sys.exit(f"Could not read {self.token_file}; log in again with --login.")
+            data = self._token_request(
+                {"grant_type": "refresh_token", "refresh_token": refresh},
+                "The saved session is no longer valid; log in again with --login.",
+            )
+            self.save_user_token(data)
+        else:
+            data = self._token_request(
+                {"grant_type": "client_credentials"},
+                "Check your client_id and client_secret.",
+            )
+            self._apply_token(data)
+
+    def save_user_token(self, data: dict):
+        """Persist the refresh token (DeviantArt rotates them on every use)."""
+        self.token_file.parent.mkdir(parents=True, exist_ok=True)
+        self.token_file.write_text(
+            json.dumps({"refresh_token": data["refresh_token"]}, indent=2),
+            encoding="utf-8",
+        )
+        try:
+            self.token_file.chmod(0o600)
+        except OSError:
+            pass
+        self._apply_token(data)
 
     def api_get(self, endpoint: str, params: dict | None = None) -> dict:
         """GET against the API with automatic token renewal and retries."""
@@ -128,11 +179,79 @@ class DeviantArtClient:
             if resp.status_code == 429:
                 wait = 2 ** (attempt + 2)
                 print(f"  Rate limit reached, waiting {wait} s...")
-                time.sleep(wait)
+                if CANCEL.wait(wait):
+                    raise RuntimeError("Cancelled by the user")
                 continue
             resp.raise_for_status()
             return resp.json()
         raise RuntimeError(f"Too many failed retries for {url}")
+
+
+def login(client: DeviantArtClient):
+    """Interactive OAuth login (Authorization Code grant).
+
+    Opens the browser so the user authorizes the app, receives the code on
+    a local HTTP server and saves the refresh token for future runs. With a
+    user session, mature deviations are served unblurred (as long as the
+    account has mature content enabled in its settings).
+    """
+    import secrets
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    state = secrets.token_urlsafe(16)
+    result: dict[str, str] = {}
+
+    class Callback(BaseHTTPRequestHandler):
+        def do_GET(self):
+            params = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
+            ok = params.get("state") == state and "code" in params
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(
+                b"<h2>Login complete, you can close this tab.</h2>" if ok
+                else b"<h2>Login failed, check the terminal.</h2>"
+            )
+            result.update(params)
+
+        def log_message(self, *args):
+            pass
+
+    auth_url = AUTH_URL + "?" + urlencode({
+        "response_type": "code",
+        "client_id": client.client_id,
+        "redirect_uri": REDIRECT_URI,
+        "scope": "browse",
+        "state": state,
+    })
+    print(
+        "A browser window will open so you can authorize the application.\n"
+        f"If it does not open, visit:\n  {auth_url}\n\n"
+        f"NOTE: the app must list {REDIRECT_URI} in its 'OAuth2 Redirect URI\n"
+        "Whitelist' (https://www.deviantart.com/developers/apps).\n"
+    )
+    server = HTTPServer(("127.0.0.1", REDIRECT_PORT), Callback)
+    try:
+        webbrowser.open(auth_url)
+        while not result:
+            server.handle_request()
+    finally:
+        server.server_close()
+
+    if result.get("state") != state or "code" not in result:
+        sys.exit(f"Authorization failed: {result.get('error_description') or result}")
+
+    data = client._token_request(
+        {
+            "grant_type": "authorization_code",
+            "code": result["code"],
+            "redirect_uri": REDIRECT_URI,
+        },
+        "Could not exchange the authorization code.",
+    )
+    client.save_user_token(data)
+    print("Login successful; the session was saved for future runs.\n")
 
 
 def extract_username(profile_url: str) -> str:
@@ -168,8 +287,11 @@ def unblur_wixmp_url(url: str) -> str:
 
     With client_credentials tokens the API serves mature deviations as a
     logged-out visitor would see them: content.src includes a ",blur_NN"
-    parameter in the wixmp transformation segment. The URL token remains
-    valid without it, so stripping it yields the unblurred image.
+    parameter in the wixmp transformation segment. For older uploads the
+    URL token authorizes any transformation, so stripping the blur yields
+    the unblurred image. For newer uploads (~mid-2021 onwards) the token
+    pins the exact path including the transformation segment, so the CDN
+    answers 403; the caller must fall back to the original blurred URL.
     """
     if url.startswith("https://images-wixmp-"):
         return re.sub(r",blur_\d+", "", url, count=1)
@@ -261,13 +383,24 @@ def fetch_gallery(client: DeviantArtClient, username: str) -> list[dict]:
     return deviations
 
 
-def download_file(session: requests.Session, url: str, dest: Path) -> bool:
+def download_file(
+    session: requests.Session, url: str, dest: Path,
+    fallback_url: str | None = None,
+) -> bool:
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
         with session.get(url, stream=True, timeout=60) as resp:
+            if resp.status_code == 403 and fallback_url:
+                # The unblurred URL was rejected (token pinned to the
+                # blurred transformation); keep the blurred preview.
+                print(f"  Unblur rejected by the CDN, keeping the blurred preview: {dest.name}")
+                return download_file(session, fallback_url, dest)
             resp.raise_for_status()
             with open(tmp, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1 << 16):
+                    if CANCEL.is_set():
+                        tmp.unlink(missing_ok=True)
+                        return False
                     f.write(chunk)
         tmp.rename(dest)
         return True
@@ -286,6 +419,9 @@ def process_deviation(
     title = dev.get("title") or "untitled"
     dev_id = dev.get("deviationid", "")
 
+    if CANCEL.is_set():
+        return "cancelled", f"Cancelled: {title}"
+
     # Duplicate: already downloaded in a previous run (even if the title
     # has changed since). Checked before calling the API. The manifest is
     # authoritative: a deleted file is not downloaded again unless
@@ -300,6 +436,7 @@ def process_deviation(
 
     # 1) Prefer the original file if the author allows downloading it
     file_url = None
+    fallback_url = None
     if dev.get("is_downloadable"):
         try:
             dl = client.api_get(f"deviation/download/{dev_id}")
@@ -312,7 +449,10 @@ def process_deviation(
         content = dev.get("content") or {}
         file_url = content.get("src")
         if file_url and unblur:
-            file_url = unblur_wixmp_url(file_url)
+            unblurred = unblur_wixmp_url(file_url)
+            if unblurred != file_url:
+                fallback_url = file_url
+                file_url = unblurred
 
     if not file_url:
         # Literature, journals, etc. have no media file
@@ -326,17 +466,19 @@ def process_deviation(
             manifest.add(dev_id, dest.name)
         return "skipped", f"Already exists, skipped: {dest.name}"
 
-    ok = download_file(client.session, file_url, dest)
+    ok = download_file(client.session, file_url, dest, fallback_url)
     if delay:
-        time.sleep(delay)
+        CANCEL.wait(delay)  # like time.sleep(delay), but wakes up on Ctrl+C
     if ok:
         if dev_id:
             manifest.add(dev_id, dest.name)
         return "downloaded", f"Downloaded: {dest.name}"
+    if CANCEL.is_set():
+        return "cancelled", f"Cancelled: {title}"
     return "failed", f"FAILED: {dest.name}"
 
 
-def main():
+def run():
     load_dotenv()
     parser = argparse.ArgumentParser(
         description="Download the full gallery of a DeviantArt profile using the official API."
@@ -344,8 +486,13 @@ def main():
     parser.add_argument(
         "profile_url",
         metavar="profile",
+        nargs="?",
         help="Profile URL (https://www.deviantart.com/username) or just the username",
     )
+    parser.add_argument("--login", action="store_true",
+                        help="Log in with your DeviantArt account (OAuth) and save the "
+                             "session. Mature works are then downloaded unblurred if "
+                             "your account has mature content enabled")
     parser.add_argument("-o", "--output",
                         default=os.environ.get("DA_OUTPUT", "").strip() or "downloads",
                         help="Output folder, absolute or relative (default: DA_OUTPUT "
@@ -378,10 +525,21 @@ def main():
             "  export DA_CLIENT_SECRET='...'"
         )
 
+    client = DeviantArtClient(args.client_id, args.client_secret)
+
+    if args.login:
+        login(client)
+    if not args.profile_url:
+        if args.login:
+            return  # login-only invocation
+        parser.error("a profile (URL or username) is required unless --login is used")
+
+    if client.user_mode:
+        print("Using the saved user session (mature works come unblurred if "
+              "your account allows them).")
+
     username = extract_username(args.profile_url)
     print(f"User: {username}")
-
-    client = DeviantArtClient(args.client_id, args.client_secret)
 
     print("Fetching gallery listing...")
     deviations = fetch_gallery(client, username)
@@ -398,9 +556,10 @@ def main():
     with open(out_dir / "_metadata.json", "w", encoding="utf-8") as f:
         json.dump(deviations, f, ensure_ascii=False, indent=2)
 
-    counts = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0}
+    counts = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
     total = len(deviations)
     done = 0
+    interrupted = False
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
@@ -408,23 +567,48 @@ def main():
                         args.redownload_missing, args.unblur): dev
             for dev in deviations
         }
-        for future in as_completed(futures):
-            done += 1
-            try:
-                status, message = future.result()
-            except Exception as e:
-                status, message = "failed", f"Unexpected ERROR: {e}"
-            counts[status] += 1
-            print(f"[{done}/{total}] {message}")
+        try:
+            for future in as_completed(futures):
+                done += 1
+                try:
+                    status, message = future.result()
+                except Exception as e:
+                    status, message = "failed", f"Unexpected ERROR: {e}"
+                counts[status] += 1
+                print(f"[{done}/{total}] {message}")
+        except KeyboardInterrupt:
+            interrupted = True
+            CANCEL.set()
+            print("\nCtrl+C received: stopping downloads and cleaning up "
+                  "partial files...")
+            pool.shutdown(cancel_futures=True)
 
     downloaded, skipped, failed, no_media = (
         counts["downloaded"], counts["skipped"], counts["failed"], counts["no_media"]
     )
+    if interrupted:
+        print(
+            f"\nInterrupted ({done} of {total} works processed). "
+            f"Downloaded: {downloaded} | Skipped (already existed): {skipped} "
+            f"| No file: {no_media} | Failed: {failed}"
+        )
+        print(f"Files saved to: {out_dir.resolve()}")
+        print("Run the same command again to resume where it left off.")
+        sys.exit(130)
     print(
         f"\nDone. Downloaded: {downloaded} | Skipped (already existed): {skipped} "
         f"| No file: {no_media} | Failed: {failed}"
     )
     print(f"Files saved to: {out_dir.resolve()}")
+
+
+def main():
+    try:
+        run()
+    except KeyboardInterrupt:
+        # Ctrl+C outside the download loop (login, gallery listing, ...)
+        print("\nInterrupted by the user.")
+        sys.exit(130)
 
 
 if __name__ == "__main__":
