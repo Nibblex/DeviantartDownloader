@@ -313,7 +313,10 @@ def main():
         metavar="profile",
         help="Profile URL (https://www.deviantart.com/username) or just the username",
     )
-    parser.add_argument("-o", "--output", default="downloads", help="Output folder (default: downloads)")
+    parser.add_argument("-o", "--output",
+                        default=os.environ.get("DA_OUTPUT", "").strip() or "downloads",
+                        help="Output folder, absolute or relative (default: DA_OUTPUT "
+                             "from .env or 'downloads')")
     parser.add_argument("--client-id", default=os.environ.get("DA_CLIENT_ID"))
     parser.add_argument("--client-secret", default=os.environ.get("DA_CLIENT_SECRET"))
     parser.add_argument("--delay", type=float, default=0.5,
@@ -345,7 +348,7 @@ def main():
         sys.exit("The gallery is empty or the user does not exist.")
     print(f"\nTotal works found: {len(deviations)}\n")
 
-    out_dir = Path(args.output) / username
+    out_dir = Path(args.output).expanduser() / username
     out_dir.mkdir(parents=True, exist_ok=True)
 
     manifest = DownloadManifest(out_dir)

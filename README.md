@@ -26,6 +26,8 @@ DA_CLIENT_ID=your_client_id
 DA_CLIENT_SECRET=your_client_secret
 # Optional: simultaneous downloads (default: 4, recommended not to exceed 8)
 DA_WORKERS=4
+# Optional: output folder, absolute or relative ("~" is expanded)
+DA_OUTPUT=~/Pictures/deviantart
 ```
 
 ## Usage
@@ -38,7 +40,7 @@ deviantart-downloader username
 deviantart-downloader username --client-id XXX --client-secret YYY
 
 # Useful options:
-deviantart-downloader username -o my_folder   # output folder (default: downloads)
+deviantart-downloader username -o my_folder   # output folder (default: DA_OUTPUT or downloads)
 deviantart-downloader username -w 8           # simultaneous downloads
 deviantart-downloader username --delay 1.0    # pause after each download, per thread
 ```
