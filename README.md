@@ -28,6 +28,9 @@ DA_CLIENT_ID=your_client_id
 DA_CLIENT_SECRET=your_client_secret
 # Optional: simultaneous downloads (default: 4, recommended not to exceed 8)
 DA_WORKERS=4
+# Optional: strip the blur filter the API applies to mature-content previews
+# (default: false, images are kept as the API serves them)
+DA_UNBLUR=false
 # Optional: output folder, absolute or relative ("~" is expanded)
 DA_OUTPUT=~/Pictures/deviantart
 ```
