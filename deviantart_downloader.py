@@ -195,11 +195,18 @@ def login(client: DeviantArtClient):
     user session, mature deviations are served unblurred (as long as the
     account has mature content enabled in its settings).
     """
+    import base64
+    import hashlib
     import secrets
     import webbrowser
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     state = secrets.token_urlsafe(16)
+    # PKCE (required by DeviantArt): S256 challenge derived from a one-off verifier
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
     result: dict[str, str] = {}
 
     class Callback(BaseHTTPRequestHandler):
@@ -224,6 +231,8 @@ def login(client: DeviantArtClient):
         "redirect_uri": REDIRECT_URI,
         "scope": "browse",
         "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
     })
     print(
         "A browser window will open so you can authorize the application.\n"
@@ -247,6 +256,7 @@ def login(client: DeviantArtClient):
             "grant_type": "authorization_code",
             "code": result["code"],
             "redirect_uri": REDIRECT_URI,
+            "code_verifier": code_verifier,
         },
         "Could not exchange the authorization code.",
     )
