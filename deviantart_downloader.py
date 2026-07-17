@@ -63,6 +63,18 @@ def env_int(name: str, default: int) -> int:
         sys.exit(f"The value of {name} must be an integer, not: {value!r}")
 
 
+def env_bool(name: str, default: bool) -> bool:
+    """Read a boolean from an environment variable, with a default value."""
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    sys.exit(f"The value of {name} must be a boolean (true/false), not: {value!r}")
+
+
 API_BASE = "https://www.deviantart.com/api/v1/oauth2"
 TOKEN_URL = "https://www.deviantart.com/oauth2/token"
 USER_AGENT = "da-gallery-downloader/1.0"
@@ -149,6 +161,19 @@ def extract_username(profile_url: str) -> str:
 def sanitize_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
     return name[:150] or "untitled"
+
+
+def unblur_wixmp_url(url: str) -> str:
+    """Remove the blur transform the API adds to mature-content previews.
+
+    With client_credentials tokens the API serves mature deviations as a
+    logged-out visitor would see them: content.src includes a ",blur_NN"
+    parameter in the wixmp transformation segment. The URL token remains
+    valid without it, so stripping it yields the unblurred image.
+    """
+    if url.startswith("https://images-wixmp-"):
+        return re.sub(r",blur_\d+", "", url, count=1)
+    return url
 
 
 def guess_extension(url: str) -> str:
@@ -254,7 +279,8 @@ def download_file(session: requests.Session, url: str, dest: Path) -> bool:
 
 def process_deviation(
     client: DeviantArtClient, dev: dict, out_dir: Path, delay: float,
-    manifest: DownloadManifest, redownload_missing: bool = False
+    manifest: DownloadManifest, redownload_missing: bool = False,
+    unblur: bool = False
 ) -> tuple[str, str]:
     """Resolve the file URL and download it. Returns (status, description)."""
     title = dev.get("title") or "untitled"
@@ -285,6 +311,8 @@ def process_deviation(
     if not file_url:
         content = dev.get("content") or {}
         file_url = content.get("src")
+        if file_url and unblur:
+            file_url = unblur_wixmp_url(file_url)
 
     if not file_url:
         # Literature, journals, etc. have no media file
@@ -329,6 +357,10 @@ def main():
     parser.add_argument("-w", "--workers", type=int, default=env_int("DA_WORKERS", 4),
                         help="Simultaneous downloads (default: DA_WORKERS from .env or 4, "
                              "recommended not to exceed 8)")
+    parser.add_argument("--unblur", action="store_true",
+                        default=env_bool("DA_UNBLUR", False),
+                        help="Strip the blur filter the API applies to mature-content "
+                             "previews (default: keep the blur, or DA_UNBLUR from .env)")
     parser.add_argument("--redownload-missing", action="store_true",
                         help="Download again works recorded in the manifest whose local "
                              "file is missing (by default, manually deleted files are "
@@ -373,7 +405,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
             pool.submit(process_deviation, client, dev, out_dir, args.delay, manifest,
-                        args.redownload_missing): dev
+                        args.redownload_missing, args.unblur): dev
             for dev in deviations
         }
         for future in as_completed(futures):

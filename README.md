@@ -3,6 +3,7 @@
 Download the full gallery of any DeviantArt profile using the [official public API](https://www.deviantart.com/developers/).
 
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
+- Can strip the blur filter the API applies to mature-content previews (opt in with `--unblur` or `DA_UNBLUR=true`).
 - Parallel downloads with retries and API rate-limit handling.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
 - Files you delete manually stay deleted: the download record (`_downloaded.json`) is authoritative, so deleted works are not downloaded again unless you pass `--redownload-missing`.
@@ -45,6 +46,7 @@ deviantart-downloader username -o my_folder   # output folder (default: DA_OUTPU
 deviantart-downloader username -w 8           # simultaneous downloads
 deviantart-downloader username --delay 1.0    # pause after each download, per thread
 deviantart-downloader username --redownload-missing  # restore manually deleted files
+deviantart-downloader username --unblur       # strip the blur on mature-content previews
 ```
 
 Files are saved to `<output>/<username>/`.
