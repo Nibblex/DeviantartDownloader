@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deviantart-gallery-downloader"
+version = "1.0.1"
+description = "Download full DeviantArt galleries using the official public API"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Sergio Rodríguez", email = "srodriguez3441@gmail.com" },
+]
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.25",
+]
+keywords = ["deviantart", "downloader", "gallery", "art", "scraper"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Multimedia :: Graphics",
+]
+
+[project.urls]
+Homepage = "https://github.com/Nibblex/DeviantartDownloader"
+Repository = "https://github.com/Nibblex/DeviantartDownloader"
+
+[project.scripts]
+deviantart-downloader = "deviantart_downloader:main"
+
+[tool.setuptools]
+py-modules = ["deviantart_downloader"]
