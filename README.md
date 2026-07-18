@@ -1,5 +1,12 @@
 # DeviantArt Downloader
 
+[![CI](https://github.com/Nibblex/DeviantartDownloader/actions/workflows/ci.yml/badge.svg)](https://github.com/Nibblex/DeviantartDownloader/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Nibblex/DeviantartDownloader/branch/main/graph/badge.svg)](https://codecov.io/gh/Nibblex/DeviantartDownloader)
+[![PyPI](https://img.shields.io/pypi/v/deviantart-gallery-downloader)](https://pypi.org/project/deviantart-gallery-downloader/)
+[![Python versions](https://img.shields.io/pypi/pyversions/deviantart-gallery-downloader)](https://pypi.org/project/deviantart-gallery-downloader/)
+[![Downloads](https://img.shields.io/pypi/dm/deviantart-gallery-downloader)](https://pypistats.org/packages/deviantart-gallery-downloader)
+[![License: MIT](https://img.shields.io/pypi/l/deviantart-gallery-downloader)](LICENSE)
+
 Download the full gallery of any DeviantArt profile using the [official public API](https://www.deviantart.com/developers/).
 
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
@@ -68,6 +75,16 @@ deviantart-downloader username           # subsequent runs use the saved session
 ```
 
 The browser opens once to authorize the app; the session is stored in `~/.config/deviantart-downloader/token.json` and renewed automatically. If it ever expires (about 3 months without use), run `--login` again. While a session is saved, mature works are downloaded unblurred and `--unblur` is unnecessary.
+
+## Development
+
+```bash
+git clone https://github.com/Nibblex/DeviantartDownloader
+cd DeviantartDownloader
+python -m venv .venv && source .venv/bin/activate
+pip install -e .[dev]
+pytest   # runs the test suite with a coverage report
+```
 
 ## License
 
