@@ -13,6 +13,7 @@ Download the full gallery of any DeviantArt profile using the [official public A
 - Downloads mature content unblurred when you log in with your account (`--login`, see below). Without login, `--unblur`/`DA_UNBLUR=true` strips the blur where possible: works uploaded since ~mid-2021 have their URL token pinned to the blurred version, so for those the blurred preview is downloaded instead.
 - Parallel downloads with retries and API rate-limit handling.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
+- Run it with no arguments to re-sync every user already present in the output folder with their latest works.
 - Files you delete manually stay deleted: the download record (`_downloaded.json`) is authoritative, so deleted works are not downloaded again unless you pass `--redownload-missing`.
 - Saves the full metadata of every work to `_metadata.json`.
 
@@ -60,6 +61,17 @@ deviantart-downloader username --unblur       # strip the blur on mature-content
 ```
 
 Files are saved to `<output>/<username>/`.
+
+### Sync every downloaded user
+
+With no profile argument, the tool scans the output folder for the users you already downloaded (their subdirectories) and fetches whatever they published since:
+
+```bash
+deviantart-downloader                # sync everyone under DA_OUTPUT (or ./downloads)
+deviantart-downloader -o my_folder   # sync everyone under my_folder
+```
+
+Only subdirectories created by a previous run are considered (they are recognised by the `_downloaded.json` / `_metadata.json` files inside), so unrelated folders in the output directory are ignored. Users whose gallery comes back empty (deactivated accounts) are skipped with a notice instead of aborting the run.
 
 ## Unblurred mature content (`--login`)
 

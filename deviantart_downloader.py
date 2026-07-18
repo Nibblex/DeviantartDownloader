@@ -13,6 +13,9 @@ Usage:
   deviantart-downloader https://www.deviantart.com/username
   deviantart-downloader username
 
+  # with no profile, re-sync every user already present in the output folder:
+  deviantart-downloader
+
   # or passing the credentials as arguments:
   deviantart-downloader <profile_url> --client-id XXX --client-secret YYY
 
@@ -503,6 +506,100 @@ def process_deviation(
     return "failed", f"FAILED: {dest.name}"
 
 
+def discover_users(output_root: Path) -> list[str]:
+    """List the users already downloaded to the output folder.
+
+    A user is any subdirectory created by a previous run, recognised by the
+    marker files the tool writes (_downloaded.json / _metadata.json), so
+    unrelated folders the user may keep in the output directory are ignored.
+    """
+    if not output_root.is_dir():
+        sys.exit(
+            f"No profile given and the output folder does not exist: {output_root}\n"
+            "Pass a profile (URL or username) to download a gallery first."
+        )
+    users = sorted(
+        d.name for d in output_root.iterdir()
+        if d.is_dir()
+        and not d.name.startswith((".", "_"))
+        and any((d / marker).is_file()
+                for marker in ("_downloaded.json", "_metadata.json"))
+    )
+    if not users:
+        sys.exit(
+            f"No previously downloaded users found in: {output_root}\n"
+            "Pass a profile (URL or username) to download a gallery first."
+        )
+    return users
+
+
+def sync_gallery(
+    client: DeviantArtClient, username: str, output_root: Path, *,
+    delay: float, workers: int, redownload_missing: bool, unblur: bool,
+) -> dict | None:
+    """Download every new work of one user. Returns the counts per status,
+    or None when the gallery is empty / the user does not exist.
+
+    Exits with code 130 if the user interrupts with Ctrl+C.
+    """
+    print(f"User: {username}")
+    print("Fetching gallery listing...")
+    deviations = fetch_gallery(client, username)
+    if not deviations:
+        return None
+    print(f"\nTotal works found: {len(deviations)}\n")
+
+    out_dir = output_root / username
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest = DownloadManifest(out_dir)
+
+    # Save the full metadata in case it is needed later
+    with open(out_dir / "_metadata.json", "w", encoding="utf-8") as f:
+        json.dump(deviations, f, ensure_ascii=False, indent=2)
+
+    counts = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
+    total = len(deviations)
+    done = 0
+    interrupted = False
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(process_deviation, client, dev, out_dir, delay, manifest,
+                        redownload_missing, unblur): dev
+            for dev in deviations
+        }
+        try:
+            for future in as_completed(futures):
+                done += 1
+                try:
+                    status, message = future.result()
+                except Exception as e:
+                    status, message = "failed", f"Unexpected ERROR: {e}"
+                counts[status] += 1
+                print(f"[{done}/{total}] {message}")
+        except KeyboardInterrupt:
+            interrupted = True
+            CANCEL.set()
+            print("\nCtrl+C received: stopping downloads and cleaning up "
+                  "partial files...")
+            pool.shutdown(cancel_futures=True)
+
+    summary = (
+        f"Downloaded: {counts['downloaded']} "
+        f"| Skipped (already existed): {counts['skipped']} "
+        f"| No file: {counts['no_media']} | Failed: {counts['failed']}"
+    )
+    if interrupted:
+        print(f"\nInterrupted ({done} of {total} works processed). {summary}")
+        print(f"Files saved to: {out_dir.resolve()}")
+        print("Run the same command again to resume where it left off.")
+        sys.exit(130)
+    print(f"\nDone. {summary}")
+    print(f"Files saved to: {out_dir.resolve()}")
+    return counts
+
+
 def run():
     load_dotenv()
     parser = argparse.ArgumentParser(
@@ -512,7 +609,9 @@ def run():
         "profile_url",
         metavar="profile",
         nargs="?",
-        help="Profile URL (https://www.deviantart.com/username) or just the username",
+        help="Profile URL (https://www.deviantart.com/username) or just the "
+             "username. If omitted, every user already downloaded to the "
+             "output folder is synced with their latest works",
     )
     parser.add_argument("--login", action="store_true",
                         help="Log in with your DeviantArt account (OAuth) and save the "
@@ -554,77 +653,46 @@ def run():
 
     if args.login:
         login(client)
-    if not args.profile_url:
-        if args.login:
+        if not args.profile_url:
             return  # login-only invocation
-        parser.error("a profile (URL or username) is required unless --login is used")
+
+    output_root = Path(args.output).expanduser()
+    if args.profile_url:
+        usernames = [extract_username(args.profile_url)]
+    else:
+        # No profile: sync every user already downloaded to the output folder
+        usernames = discover_users(output_root)
+        print(
+            f"No profile given: syncing {len(usernames)} previously "
+            f"downloaded user(s) in {output_root}: {', '.join(usernames)}\n"
+        )
 
     if client.user_mode:
         print("Using the saved user session (mature works come unblurred if "
               "your account allows them).")
 
-    username = extract_username(args.profile_url)
-    print(f"User: {username}")
-
-    print("Fetching gallery listing...")
-    deviations = fetch_gallery(client, username)
-    if not deviations:
-        sys.exit("The gallery is empty or the user does not exist.")
-    print(f"\nTotal works found: {len(deviations)}\n")
-
-    out_dir = Path(args.output).expanduser() / username
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    manifest = DownloadManifest(out_dir)
-
-    # Save the full metadata in case it is needed later
-    with open(out_dir / "_metadata.json", "w", encoding="utf-8") as f:
-        json.dump(deviations, f, ensure_ascii=False, indent=2)
-
-    counts = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
-    total = len(deviations)
-    done = 0
-    interrupted = False
-
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {
-            pool.submit(process_deviation, client, dev, out_dir, args.delay, manifest,
-                        args.redownload_missing, args.unblur): dev
-            for dev in deviations
-        }
-        try:
-            for future in as_completed(futures):
-                done += 1
-                try:
-                    status, message = future.result()
-                except Exception as e:
-                    status, message = "failed", f"Unexpected ERROR: {e}"
-                counts[status] += 1
-                print(f"[{done}/{total}] {message}")
-        except KeyboardInterrupt:
-            interrupted = True
-            CANCEL.set()
-            print("\nCtrl+C received: stopping downloads and cleaning up "
-                  "partial files...")
-            pool.shutdown(cancel_futures=True)
-
-    downloaded, skipped, failed, no_media = (
-        counts["downloaded"], counts["skipped"], counts["failed"], counts["no_media"]
-    )
-    if interrupted:
-        print(
-            f"\nInterrupted ({done} of {total} works processed). "
-            f"Downloaded: {downloaded} | Skipped (already existed): {skipped} "
-            f"| No file: {no_media} | Failed: {failed}"
+    totals = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
+    for username in usernames:
+        counts = sync_gallery(
+            client, username, output_root,
+            delay=args.delay, workers=args.workers,
+            redownload_missing=args.redownload_missing, unblur=args.unblur,
         )
-        print(f"Files saved to: {out_dir.resolve()}")
-        print("Run the same command again to resume where it left off.")
-        sys.exit(130)
-    print(
-        f"\nDone. Downloaded: {downloaded} | Skipped (already existed): {skipped} "
-        f"| No file: {no_media} | Failed: {failed}"
-    )
-    print(f"Files saved to: {out_dir.resolve()}")
+        if counts is None:
+            if args.profile_url:
+                sys.exit("The gallery is empty or the user does not exist.")
+            print(f"Skipping {username}: the gallery is empty or the user no longer exists.\n")
+            continue
+        for status, count in counts.items():
+            totals[status] += count
+        print()
+
+    if len(usernames) > 1:
+        print(
+            f"All users synced. Downloaded: {totals['downloaded']} "
+            f"| Skipped (already existed): {totals['skipped']} "
+            f"| No file: {totals['no_media']} | Failed: {totals['failed']}"
+        )
 
 
 def main():

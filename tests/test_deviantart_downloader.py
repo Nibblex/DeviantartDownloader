@@ -611,9 +611,9 @@ class TestRun:
         with pytest.raises(SystemExit, match="Missing API credentials"):
             dd.run()
 
-    def test_requires_profile(self, clean_cli_env, monkeypatch, capsys):
-        set_argv(monkeypatch)
-        with pytest.raises(SystemExit):
+    def test_no_profile_and_no_output_dir_exits(self, clean_cli_env, monkeypatch):
+        set_argv(monkeypatch, "--client-id", "x", "--client-secret", "y")
+        with pytest.raises(SystemExit, match="does not exist"):
             dd.run()
 
     def test_rejects_zero_workers(self, clean_cli_env, monkeypatch):
@@ -656,6 +656,115 @@ class TestRun:
         stdout = capsys.readouterr().out
         assert "Downloaded: 1" in stdout
         assert "No file: 1" in stdout
+
+
+def make_user_dir(root, username, marker="_downloaded.json", content="{}"):
+    d = root / username
+    d.mkdir(parents=True)
+    (d / marker).write_text(content, encoding="utf-8")
+    return d
+
+
+class TestDiscoverUsers:
+    def test_finds_downloaded_users_sorted(self, tmp_path):
+        make_user_dir(tmp_path, "zeta")
+        make_user_dir(tmp_path, "alpha", marker="_metadata.json", content="[]")
+        assert dd.discover_users(tmp_path) == ["alpha", "zeta"]
+
+    def test_ignores_unrelated_entries(self, tmp_path):
+        make_user_dir(tmp_path, "artist")
+        (tmp_path / "random-folder").mkdir()          # no marker files
+        (tmp_path / ".hidden").mkdir()
+        (tmp_path / "_underscore").mkdir()
+        (tmp_path / "loose-file.txt").write_bytes(b"x")
+        assert dd.discover_users(tmp_path) == ["artist"]
+
+    def test_missing_output_dir_exits(self, tmp_path):
+        with pytest.raises(SystemExit, match="does not exist"):
+            dd.discover_users(tmp_path / "nope")
+
+    def test_no_users_exits(self, tmp_path):
+        (tmp_path / "random-folder").mkdir()
+        with pytest.raises(SystemExit, match="No previously downloaded users"):
+            dd.discover_users(tmp_path)
+
+
+class TestSyncAll:
+    @pytest.fixture
+    def galleries(self, monkeypatch):
+        """Patch fetch_gallery/download_file; galleries dict drives the data."""
+        galleries = {}
+        monkeypatch.setattr(
+            dd, "fetch_gallery",
+            lambda client, username: galleries.get(username, []))
+
+        def fake_download(session, url, dest, fallback=None):
+            dest.write_bytes(b"x")
+            return True
+
+        monkeypatch.setattr(dd, "download_file", fake_download)
+        return galleries
+
+    def test_syncs_every_downloaded_user(self, clean_cli_env, monkeypatch,
+                                         galleries, capsys):
+        out = clean_cli_env / "out"
+        make_user_dir(out, "alice")
+        make_user_dir(out, "bob")
+        galleries["alice"] = [make_dev()]
+        galleries["bob"] = [make_dev(deviationid="ffffeeee-0000", title="Bob Art")]
+
+        set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        dd.run()
+
+        assert (out / "alice" / "My Art_abcd1234.png").is_file()
+        assert (out / "bob" / "Bob Art_ffffeeee.png").is_file()
+        stdout = capsys.readouterr().out
+        assert "syncing 2 previously downloaded user(s)" in stdout
+        assert "All users synced. Downloaded: 2" in stdout
+
+    def test_empty_gallery_is_skipped_not_fatal(self, clean_cli_env, monkeypatch,
+                                                galleries, capsys):
+        out = clean_cli_env / "out"
+        make_user_dir(out, "ghost")     # deactivated account: empty gallery
+        make_user_dir(out, "alice")
+        galleries["alice"] = [make_dev()]
+
+        set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        dd.run()
+
+        assert (out / "alice" / "My Art_abcd1234.png").is_file()
+        stdout = capsys.readouterr().out
+        assert "Skipping ghost" in stdout
+
+    def test_explicit_profile_with_empty_gallery_still_exits(
+            self, clean_cli_env, monkeypatch, galleries):
+        set_argv(monkeypatch, "someartist", "-o", str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y")
+        with pytest.raises(SystemExit, match="empty"):
+            dd.run()
+
+    def test_sync_reuses_manifest_and_skips_existing(self, clean_cli_env,
+                                                     monkeypatch, galleries,
+                                                     capsys):
+        out = clean_cli_env / "out"
+        gallery_dir = make_user_dir(
+            out, "alice", content=json.dumps({"ABCD1234": "My Art_abcd1234.png"}))
+        (gallery_dir / "My Art_abcd1234.png").write_bytes(b"x")
+        galleries["alice"] = [
+            make_dev(),
+            make_dev(deviationid="ffffeeee-0000", title="New Work"),
+        ]
+
+        set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        dd.run()
+
+        assert (gallery_dir / "New Work_ffffeeee.png").is_file()
+        stdout = capsys.readouterr().out
+        assert "Downloaded: 1" in stdout
+        assert "Skipped (already existed): 1" in stdout
 
 
 class TestMain:
