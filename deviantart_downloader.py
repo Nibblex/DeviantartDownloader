@@ -388,8 +388,17 @@ class DownloadManifest:
         tmp.replace(self.path)
 
 
-def fetch_gallery(client: DeviantArtClient, username: str) -> list[dict]:
-    """Walk every page of gallery/all and return the deviations."""
+def fetch_gallery(
+    client: DeviantArtClient, username: str, *,
+    manifest: DownloadManifest | None = None, full: bool = False,
+) -> list[dict]:
+    """Walk the pages of gallery/all (newest first) and return the deviations.
+
+    When a manifest is given and full is False, pagination stops after the
+    first page whose works are all already recorded: everything older was
+    listed by a previous run. Failed downloads are never in the manifest,
+    so they keep the walk going until they succeed.
+    """
     deviations = []
     offset = 0
     while True:
@@ -406,6 +415,12 @@ def fetch_gallery(client: DeviantArtClient, username: str) -> list[dict]:
         deviations.extend(results)
         print(f"  Page at offset {offset}: {len(results)} works (total: {len(deviations)})")
         if not data.get("has_more"):
+            break
+        if (manifest is not None and not full and results
+                and all(d.get("deviationid") and manifest.has(d["deviationid"])
+                        for d in results)):
+            print("  Every work on this page was already downloaded; stopping the "
+                  "listing early (pass --full to walk the whole gallery).")
             break
         offset = data.get("next_offset") or offset + PAGE_LIMIT
     return deviations
@@ -536,6 +551,7 @@ def discover_users(output_root: Path) -> list[str]:
 def sync_gallery(
     client: DeviantArtClient, username: str, output_root: Path, *,
     delay: float, workers: int, redownload_missing: bool, unblur: bool,
+    full: bool = False,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
     or None when the gallery is empty / the user does not exist.
@@ -544,19 +560,39 @@ def sync_gallery(
     """
     print(f"User: {username}")
     print("Fetching gallery listing...")
-    deviations = fetch_gallery(client, username)
+    out_dir = output_root / username
+    # Loading the manifest before fetching lets the listing stop at the
+    # first fully downloaded page. --redownload-missing needs the whole
+    # listing: the files it restores are recorded in the manifest, so the
+    # early stop would hide them.
+    manifest = DownloadManifest(out_dir) if out_dir.is_dir() else None
+    deviations = fetch_gallery(client, username, manifest=manifest,
+                               full=full or redownload_missing)
     if not deviations:
         return None
     print(f"\nTotal works found: {len(deviations)}\n")
 
-    out_dir = output_root / username
     out_dir.mkdir(parents=True, exist_ok=True)
+    if manifest is None:
+        manifest = DownloadManifest(out_dir)
 
-    manifest = DownloadManifest(out_dir)
-
-    # Save the full metadata in case it is needed later
-    with open(out_dir / "_metadata.json", "w", encoding="utf-8") as f:
-        json.dump(deviations, f, ensure_ascii=False, indent=2)
+    # Save the full metadata in case it is needed later. Merge with the
+    # previous file so works beyond the early stop point are kept.
+    meta_path = out_dir / "_metadata.json"
+    metadata = deviations
+    if meta_path.is_file():
+        try:
+            previous = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            previous = []
+        if isinstance(previous, list):
+            fetched = {d.get("deviationid") for d in deviations}
+            metadata = deviations + [
+                d for d in previous
+                if isinstance(d, dict) and d.get("deviationid") not in fetched
+            ]
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
 
     counts = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
     total = len(deviations)
@@ -636,6 +672,12 @@ def run():
                         help="Download again works recorded in the manifest whose local "
                              "file is missing (by default, manually deleted files are "
                              "not downloaded again)")
+    parser.add_argument("--full", action="store_true",
+                        help="Walk the entire gallery listing. By default it stops at "
+                             "the first page whose works were all downloaded in "
+                             "previous runs; use --full occasionally to pick up older "
+                             "works that became visible later (e.g. mature content "
+                             "after --login)")
     args = parser.parse_args()
 
     if args.workers < 1:
@@ -677,6 +719,7 @@ def run():
             client, username, output_root,
             delay=args.delay, workers=args.workers,
             redownload_missing=args.redownload_missing, unblur=args.unblur,
+            full=args.full,
         )
         if counts is None:
             if args.profile_url:

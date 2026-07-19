@@ -392,6 +392,58 @@ def test_fetch_gallery_walks_every_page(capsys):
     assert client.calls[0][1]["username"] == "artist"
 
 
+class TestFetchGalleryEarlyStop:
+    def make_pages(self):
+        return [
+            {"results": [make_dev()], "has_more": True, "next_offset": 24},
+            {"results": [make_dev(deviationid="ffffeeee-0000")], "has_more": False},
+        ]
+
+    def test_stops_at_fully_downloaded_page(self, tmp_path, capsys):
+        manifest = dd.DownloadManifest(tmp_path)
+        manifest.add(DEV_ID, "My Art_abcd1234.png")
+        client = FakeClient(pages=self.make_pages())
+        deviations = dd.fetch_gallery(client, "artist", manifest=manifest)
+        assert [d["deviationid"] for d in deviations] == [DEV_ID]
+        assert len(client.calls) == 1
+        assert "stopping the listing early" in capsys.readouterr().out
+
+    def test_full_walks_past_downloaded_pages(self, tmp_path):
+        manifest = dd.DownloadManifest(tmp_path)
+        manifest.add(DEV_ID, "My Art_abcd1234.png")
+        client = FakeClient(pages=self.make_pages())
+        deviations = dd.fetch_gallery(client, "artist", manifest=manifest,
+                                      full=True)
+        assert len(deviations) == 2
+
+    def test_no_manifest_walks_every_page(self, capsys):
+        client = FakeClient(pages=self.make_pages())
+        deviations = dd.fetch_gallery(client, "artist")
+        assert len(deviations) == 2
+
+    def test_keeps_walking_while_a_work_is_unrecorded(self, tmp_path):
+        # A failed download is never recorded in the manifest, so its page
+        # keeps the walk going until the work is retried successfully.
+        manifest = dd.DownloadManifest(tmp_path)
+        manifest.add(DEV_ID, "My Art_abcd1234.png")
+        client = FakeClient(pages=[
+            {"results": [make_dev(), make_dev(deviationid="99999999-0000")],
+             "has_more": True, "next_offset": 24},
+            {"results": [make_dev(deviationid="ffffeeee-0000")], "has_more": False},
+        ])
+        deviations = dd.fetch_gallery(client, "artist", manifest=manifest)
+        assert len(deviations) == 3
+
+    def test_page_without_ids_does_not_stop(self, tmp_path):
+        manifest = dd.DownloadManifest(tmp_path)
+        client = FakeClient(pages=[
+            {"results": [{"title": "no id"}], "has_more": True, "next_offset": 24},
+            {"results": [make_dev(deviationid="ffffeeee-0000")], "has_more": False},
+        ])
+        deviations = dd.fetch_gallery(client, "artist", manifest=manifest)
+        assert len(deviations) == 2
+
+
 # ---------------------------------------------------------------------------
 # download_file
 # ---------------------------------------------------------------------------
@@ -623,7 +675,7 @@ class TestRun:
             dd.run()
 
     def test_empty_gallery_exits(self, clean_cli_env, monkeypatch):
-        monkeypatch.setattr(dd, "fetch_gallery", lambda client, username: [])
+        monkeypatch.setattr(dd, "fetch_gallery", lambda client, username, **kw: [])
         set_argv(monkeypatch, "someartist", "--client-id", "x",
                  "--client-secret", "y")
         with pytest.raises(SystemExit, match="empty"):
@@ -634,7 +686,7 @@ class TestRun:
             make_dev(),
             make_dev(deviationid="ffffeeee-0000", title="Journal", content=None),
         ]
-        monkeypatch.setattr(dd, "fetch_gallery", lambda client, username: devs)
+        monkeypatch.setattr(dd, "fetch_gallery", lambda client, username, **kw: devs)
 
         def fake_download(session, url, dest, fallback=None):
             dest.write_bytes(b"x")
@@ -656,6 +708,60 @@ class TestRun:
         stdout = capsys.readouterr().out
         assert "Downloaded: 1" in stdout
         assert "No file: 1" in stdout
+
+    def test_metadata_merges_across_runs(self, clean_cli_env, monkeypatch, capsys):
+        fetch_kwargs = []
+        batches = [
+            [make_dev()],
+            # Second run: the early stop only returned the newest work
+            [make_dev(deviationid="ffffeeee-0000", title="New Art")],
+        ]
+
+        def fake_fetch(client, username, **kw):
+            fetch_kwargs.append(kw)
+            return batches.pop(0)
+
+        def fake_download(session, url, dest, fallback=None):
+            dest.write_bytes(b"x")
+            return True
+
+        monkeypatch.setattr(dd, "fetch_gallery", fake_fetch)
+        monkeypatch.setattr(dd, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        argv = ("someartist", "-o", str(out), "--client-id", "x",
+                "--client-secret", "y", "--delay", "0")
+        set_argv(monkeypatch, *argv)
+        dd.run()
+        set_argv(monkeypatch, *argv)
+        dd.run()
+
+        # No manifest before the first run; the second run can stop early
+        assert fetch_kwargs[0]["manifest"] is None
+        assert fetch_kwargs[1]["manifest"] is not None
+        meta = json.loads(
+            (out / "someartist" / "_metadata.json").read_text(encoding="utf-8"))
+        assert [d["deviationid"] for d in meta] == ["ffffeeee-0000", DEV_ID]
+
+    @pytest.mark.parametrize("flag", ["--full", "--redownload-missing"])
+    def test_flags_force_the_full_listing(self, clean_cli_env, monkeypatch, flag):
+        seen = {}
+
+        def fake_fetch(client, username, **kw):
+            seen.update(kw)
+            return [make_dev()]
+
+        def fake_download(session, url, dest, fallback=None):
+            dest.write_bytes(b"x")
+            return True
+
+        monkeypatch.setattr(dd, "fetch_gallery", fake_fetch)
+        monkeypatch.setattr(dd, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        make_user_dir(out, "someartist")
+        set_argv(monkeypatch, "someartist", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0", flag)
+        dd.run()
+        assert seen["full"] is True
 
 
 def make_user_dir(root, username, marker="_downloaded.json", content="{}"):
@@ -696,7 +802,7 @@ class TestSyncAll:
         galleries = {}
         monkeypatch.setattr(
             dd, "fetch_gallery",
-            lambda client, username: galleries.get(username, []))
+            lambda client, username, **kw: galleries.get(username, []))
 
         def fake_download(session, url, dest, fallback=None):
             dest.write_bytes(b"x")

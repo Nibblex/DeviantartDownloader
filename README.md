@@ -14,6 +14,7 @@ Download the full gallery of any DeviantArt profile using the [official public A
 - Parallel downloads with retries and API rate-limit handling.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
 - Run it with no arguments to re-sync every user already present in the output folder with their latest works.
+- Re-syncs are incremental: the gallery listing stops as soon as it reaches a page of already-downloaded works (`--full` forces a complete walk).
 - Files you delete manually stay deleted: the download record (`_downloaded.json`) is authoritative, so deleted works are not downloaded again unless you pass `--redownload-missing`.
 - Saves the full metadata of every work to `_metadata.json`.
 
@@ -58,9 +59,12 @@ deviantart-downloader username -w 8           # simultaneous downloads
 deviantart-downloader username --delay 1.0    # pause after each download, per thread
 deviantart-downloader username --redownload-missing  # restore manually deleted files
 deviantart-downloader username --unblur       # strip the blur on mature-content previews
+deviantart-downloader username --full         # walk the entire gallery listing
 ```
 
 Files are saved to `<output>/<username>/`.
+
+When re-syncing a user, the gallery listing (newest first) stops at the first page whose works were all downloaded before, so frequent re-runs stay cheap even on huge galleries. Pass `--full` occasionally to walk the whole listing and pick up older works that became visible later (for example mature content after `--login`); `--redownload-missing` implies it.
 
 ### Sync every downloaded user
 
