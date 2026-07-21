@@ -136,4 +136,7 @@ The test suite mirrors that layout (`tests/test_<module>.py`), with the fakes an
 
 ## License
 
-MIT
+GNU General Public License v3.0 or later — see [LICENSE](LICENSE).
+
+Releases up to and including 1.6.1 were published under the MIT license and stay
+available under those terms; 1.7.0 onwards are GPLv3+.
