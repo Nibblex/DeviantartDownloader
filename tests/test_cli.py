@@ -120,6 +120,23 @@ class TestRun:
         cli.run()
         assert (out / "artist" / "web" / "Web Art_1004952679.jpg").is_file()
 
+    def test_damaged_metadata_is_reported_and_regenerated(self, clean_cli_env,
+                                                          monkeypatch, capsys):
+        devs = [make_dev()]
+        monkeypatch.setattr(listing, "fetch_gallery",
+                            lambda client, username, **kw: devs)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        gallery = make_user_dir(out, "someartist")
+        (gallery / "_metadata.json").write_text("[{truncated", encoding="utf-8")
+        set_argv(monkeypatch, "someartist", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        cli.run()
+
+        assert "WARNING: could not read _metadata.json" in capsys.readouterr().out
+        assert json.loads(
+            (gallery / "_metadata.json").read_text(encoding="utf-8")) == devs
+
     def test_metadata_merges_across_runs(self, clean_cli_env, monkeypatch, capsys):
         fetch_kwargs = []
         batches = [

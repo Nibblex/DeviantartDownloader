@@ -1,6 +1,5 @@
 """Orchestration: list a gallery, route each work, download the lot."""
 
-import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -11,6 +10,7 @@ from .downloads import process_deviation
 from .listing import list_gallery, resolve_via_api
 from .manifest import DownloadManifest
 from .naming import deviation_key
+from .storage import read_json, write_json
 from .web import WebClient, needs_api
 
 
@@ -60,13 +60,7 @@ def sync_gallery(
     # early stop would hide them.
     manifest = DownloadManifest(out_dir) if out_dir.is_dir() else None
     meta_path = out_dir / "_metadata.json"
-    previous_meta = []
-    if meta_path.is_file():
-        try:
-            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
-            previous_meta = loaded if isinstance(loaded, list) else []
-        except (json.JSONDecodeError, OSError):
-            previous_meta = []
+    previous_meta = read_json(meta_path, [])
     # Manifests written by API-only versions are keyed by UUID, which the
     # website route cannot match; the saved metadata bridges both ids.
     if manifest is not None and web is not None and previous_meta:
@@ -108,8 +102,7 @@ def sync_gallery(
             d for d in previous_meta
             if isinstance(d, dict) and deviation_key(d) not in fetched
         ]
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    write_json(meta_path, metadata)
 
     counts = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
     total = len(jobs)

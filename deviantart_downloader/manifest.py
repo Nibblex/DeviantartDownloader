@@ -1,12 +1,12 @@
 """The per-gallery record of what has already been downloaded."""
 
-import json
 import re
 import threading
 from pathlib import Path
 
 from .constants import API_SUBDIR, WEB_SUBDIR
 from .naming import deviation_key
+from .storage import read_json, write_json
 
 
 class DownloadManifest:
@@ -21,14 +21,8 @@ class DownloadManifest:
     def __init__(self, out_dir: Path):
         self.path = out_dir / "_downloaded.json"
         self._lock = threading.Lock()
-        self._entries: dict[str, str] = {}
-        if self.path.is_file():
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    self._entries = {str(k): str(v) for k, v in data.items()}
-            except (json.JSONDecodeError, OSError):
-                print(f"  WARNING: could not read {self.path.name}, it will be regenerated.")
+        self._entries = {str(k): str(v)
+                         for k, v in read_json(self.path, {}).items()}
         self._seed_from_existing_files(out_dir)
 
     def _seed_from_existing_files(self, out_dir: Path):
@@ -91,9 +85,4 @@ class DownloadManifest:
             self._save_locked()
 
     def _save_locked(self):
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(self._entries, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp.replace(self.path)
+        write_json(self.path, self._entries)
