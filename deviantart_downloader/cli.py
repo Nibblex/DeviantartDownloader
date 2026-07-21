@@ -1,0 +1,135 @@
+"""Argument parsing and the entry point."""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+from .api import ApiError, DeviantArtClient
+from .auth import login
+from .config import env_bool, env_int, load_dotenv
+from .naming import extract_username
+from .sync import discover_users, sync_gallery
+from .web import WebClient
+
+
+def run():
+    load_dotenv()
+    parser = argparse.ArgumentParser(
+        description="Download the full gallery of a DeviantArt profile using the official API."
+    )
+    parser.add_argument(
+        "profile_url",
+        metavar="profile",
+        nargs="?",
+        help="Profile URL (https://www.deviantart.com/username) or just the "
+             "username. If omitted, every user already downloaded to the "
+             "output folder is synced with their latest works",
+    )
+    parser.add_argument("--login", action="store_true",
+                        help="Log in with your DeviantArt account (OAuth) and save the "
+                             "session. Mature works are then downloaded unblurred if "
+                             "your account has mature content enabled")
+    parser.add_argument("-o", "--output",
+                        default=os.environ.get("DA_OUTPUT", "").strip() or "downloads",
+                        help="Output folder, absolute or relative (default: DA_OUTPUT "
+                             "from .env or 'downloads')")
+    parser.add_argument("--client-id", default=os.environ.get("DA_CLIENT_ID"))
+    parser.add_argument("--client-secret", default=os.environ.get("DA_CLIENT_SECRET"))
+    parser.add_argument("--delay", type=float, default=0.5,
+                        help="Pause in seconds after each download, per thread (default: 0.5)")
+    parser.add_argument("-w", "--workers", type=int, default=env_int("DA_WORKERS", 4),
+                        help="Simultaneous downloads (default: DA_WORKERS from .env or 4, "
+                             "recommended not to exceed 8)")
+    parser.add_argument("--api-only", action="store_true",
+                        default=env_bool("DA_API_ONLY", False),
+                        help="Route every work through the API instead of reading "
+                             "the public listing off the website (slower on the "
+                             "API quota; use it if the website route breaks)")
+    parser.add_argument("--unblur", action="store_true",
+                        default=env_bool("DA_UNBLUR", False),
+                        help="Strip the blur filter the API applies to mature-content "
+                             "previews (default: keep the blur, or DA_UNBLUR from .env)")
+    parser.add_argument("--redownload-missing", action="store_true",
+                        help="Download again works recorded in the manifest whose local "
+                             "file is missing (by default, manually deleted files are "
+                             "not downloaded again)")
+    parser.add_argument("--full", action="store_true",
+                        help="Walk the entire gallery listing. By default it stops at "
+                             "the first page whose works were all downloaded in "
+                             "previous runs; use --full occasionally to pick up older "
+                             "works that became visible later (e.g. mature content "
+                             "after --login)")
+    args = parser.parse_args()
+
+    if args.workers < 1:
+        sys.exit(f"The number of workers must be at least 1 (got: {args.workers}).")
+
+    if not args.client_id or not args.client_secret:
+        sys.exit(
+            "Missing API credentials.\n"
+            "Register at https://www.deviantart.com/developers/register and then:\n"
+            "  export DA_CLIENT_ID='...'\n"
+            "  export DA_CLIENT_SECRET='...'"
+        )
+
+    client = DeviantArtClient(args.client_id, args.client_secret)
+
+    if args.login:
+        login(client)
+        if not args.profile_url:
+            return  # login-only invocation
+
+    output_root = Path(args.output).expanduser()
+    if args.profile_url:
+        usernames = [extract_username(args.profile_url)]
+    else:
+        # No profile: sync every user already downloaded to the output folder
+        usernames = discover_users(output_root)
+        print(
+            f"No profile given: syncing {len(usernames)} previously "
+            f"downloaded user(s) in {output_root}: {', '.join(usernames)}\n"
+        )
+
+    if client.user_mode:
+        print("Using the saved user session (mature works come unblurred if "
+              "your account allows them).")
+
+    web = None if args.api_only else WebClient()
+    if web is None:
+        print("API-only mode: every work goes through the API.")
+
+    totals = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
+    for username in usernames:
+        counts = sync_gallery(
+            client, username, output_root,
+            delay=args.delay, workers=args.workers,
+            redownload_missing=args.redownload_missing, unblur=args.unblur,
+            full=args.full, web=web,
+        )
+        if counts is None:
+            if args.profile_url:
+                sys.exit("The gallery is empty or the user does not exist.")
+            print(f"Skipping {username}: the gallery is empty or the user no longer exists.\n")
+            continue
+        for status, count in counts.items():
+            totals[status] += count
+        print()
+
+    if len(usernames) > 1:
+        print(
+            f"All users synced. Downloaded: {totals['downloaded']} "
+            f"| Skipped (already existed): {totals['skipped']} "
+            f"| No file: {totals['no_media']} | Failed: {totals['failed']}"
+        )
+
+
+def main():
+    try:
+        run()
+    except ApiError as e:
+        sys.exit(f"\n{e}")
+    except KeyboardInterrupt:
+        # Ctrl+C outside the download loop (login, gallery listing, ...)
+        print("\nInterrupted by the user.")
+        sys.exit(130)

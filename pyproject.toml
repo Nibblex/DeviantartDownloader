@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deviantart-gallery-downloader"
-version = "1.5.0"
-description = "Download full DeviantArt galleries using the official public API"
+version = "1.6.0"
+description = "Download full DeviantArt galleries, sparing the API quota for mature content"
 readme = "README.md"
 license = "MIT"
 authors = [
@@ -40,10 +40,10 @@ Homepage = "https://github.com/Nibblex/DeviantartDownloader"
 Repository = "https://github.com/Nibblex/DeviantartDownloader"
 
 [project.scripts]
-deviantart-downloader = "deviantart_downloader:main"
+deviantart-downloader = "deviantart_downloader.cli:main"
 
 [tool.setuptools]
-py-modules = ["deviantart_downloader"]
+packages = ["deviantart_downloader"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
