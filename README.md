@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/deviantart-gallery-downloader)](https://pypi.org/project/deviantart-gallery-downloader/)
 [![Python versions](https://img.shields.io/pypi/pyversions/deviantart-gallery-downloader)](https://pypi.org/project/deviantart-gallery-downloader/)
 [![Downloads](https://img.shields.io/pypi/dm/deviantart-gallery-downloader)](https://pypistats.org/packages/deviantart-gallery-downloader)
-[![License: MIT](https://img.shields.io/pypi/l/deviantart-gallery-downloader)](LICENSE)
+[![License](https://img.shields.io/pypi/l/deviantart-gallery-downloader)](LICENSE)
 
 Download the full gallery of any DeviantArt profile.
 
