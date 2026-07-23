@@ -63,6 +63,22 @@ class TestDeviantArtClient:
         with pytest.raises(requests.HTTPError):
             client.api_get("gallery/all")
 
+    def test_api_get_raises_user_not_found_on_deactivated_profile(self, tmp_path):
+        session = FakeSession(get_responses=[FakeResponse(
+            400, {"error": "invalid_request",
+                  "error_description": 'User "ghost" not found.'})])
+        client = make_client(tmp_path, session)
+        with pytest.raises(api.UserNotFoundError, match="not found"):
+            client.api_get("gallery/all", params={"username": "ghost"})
+
+    def test_api_get_other_400_still_raises_http_error(self, tmp_path):
+        session = FakeSession(get_responses=[FakeResponse(
+            400, {"error": "invalid_request",
+                  "error_description": "Invalid offset."})])
+        client = make_client(tmp_path, session)
+        with pytest.raises(requests.HTTPError):
+            client.api_get("gallery/all")
+
     def test_api_get_refreshes_token_on_401(self, tmp_path):
         session = FakeSession(
             get_responses=[FakeResponse(401), FakeResponse(200, {"ok": True})],

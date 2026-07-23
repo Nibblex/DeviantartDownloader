@@ -35,6 +35,17 @@ class TestRun:
         with pytest.raises(SystemExit, match="empty"):
             cli.run()
 
+    def test_deactivated_profile_exits_gracefully(self, clean_cli_env,
+                                                  monkeypatch, capsys):
+        def gone(client, username, **kw):
+            raise api.UserNotFoundError('User "ghost" not found.')
+
+        monkeypatch.setattr(listing, "fetch_gallery", gone)
+        set_argv(monkeypatch, "ghost", "--client-id", "x", "--client-secret", "y")
+        with pytest.raises(SystemExit, match="does not exist"):
+            cli.run()
+        assert 'User "ghost" not found.' in capsys.readouterr().out
+
     def test_end_to_end_download(self, clean_cli_env, monkeypatch, capsys):
         devs = [
             make_dev(),
@@ -251,6 +262,28 @@ class TestSyncAll:
 
         assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
         stdout = capsys.readouterr().out
+        assert "Skipping ghost" in stdout
+
+    def test_deactivated_user_is_skipped_not_fatal(self, clean_cli_env,
+                                                   monkeypatch, capsys):
+        out = clean_cli_env / "out"
+        make_user_dir(out, "ghost")     # profile deactivated since last sync
+        make_user_dir(out, "alice")
+
+        def fetch(client, username, **kw):
+            if username == "ghost":
+                raise api.UserNotFoundError('User "ghost" not found.')
+            return [make_dev()]
+
+        monkeypatch.setattr(listing, "fetch_gallery", fetch)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        cli.run()
+
+        assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
+        stdout = capsys.readouterr().out
+        assert 'User "ghost" not found.' in stdout
         assert "Skipping ghost" in stdout
 
     def test_explicit_profile_with_empty_gallery_still_exits(

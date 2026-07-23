@@ -15,6 +15,29 @@ class ApiError(RuntimeError):
     """The API kept failing after exhausting every retry."""
 
 
+class UserNotFoundError(ApiError):
+    """The profile does not exist or its owner deactivated their account.
+
+    A deactivated or missing profile answers gallery/all with HTTP 400 rather
+    than an empty listing, so it is singled out from other client errors.
+    """
+
+
+def _user_not_found(resp: requests.Response) -> str | None:
+    """The API's message when a 400 means the user is gone, else None.
+
+    A deactivated or non-existent profile answers with a body like
+    {"error_description": "User \\"x\\" not found."}; any other 400 (a bad
+    parameter, say) carries a different description and is left to raise.
+    """
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    description = str(body.get("error_description") or "")
+    return description if "not found" in description.lower() else None
+
+
 class DeviantArtClient:
     def __init__(self, client_id: str, client_secret: str, token_file: Path = TOKEN_FILE):
         self.client_id = client_id
@@ -111,6 +134,8 @@ class DeviantArtClient:
                 if CANCEL.wait(wait):
                     raise RuntimeError("Cancelled by the user")
                 continue
+            if resp.status_code == 400 and (detail := _user_not_found(resp)):
+                raise UserNotFoundError(detail)
             resp.raise_for_status()
             return resp.json()
         raise ApiError(

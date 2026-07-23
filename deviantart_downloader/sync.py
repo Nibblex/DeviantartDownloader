@@ -4,7 +4,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .api import DeviantArtClient
+from .api import DeviantArtClient, UserNotFoundError
 from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR
 from .downloads import process_deviation
 from .listing import list_gallery, resolve_via_api
@@ -70,8 +70,14 @@ def sync_gallery(
                   "routes recognise them.")
 
     listing_full = full or redownload_missing
-    deviations, from_web = list_gallery(client, web, username,
-                                        manifest=manifest, full=listing_full)
+    try:
+        deviations, from_web = list_gallery(client, web, username,
+                                            manifest=manifest, full=listing_full)
+    except UserNotFoundError as e:
+        # Deactivated or non-existent profile; treat it like an empty gallery
+        # so the caller reports it and, when syncing many users, moves on.
+        print(f"  {e}")
+        return None
     if not deviations:
         return None
     print(f"\nTotal works found: {len(deviations)}\n")
