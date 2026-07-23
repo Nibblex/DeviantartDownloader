@@ -11,7 +11,8 @@ from .config import env_bool, env_float, env_int, load_dotenv
 from .listing import GalleryNotFoundError
 from .naming import extract_username
 from .profile import print_profile
-from .sync import discover_users, sync_gallery
+from .sync import (add_stats, discover_users, human_size, new_stats,
+                   summary_lines, sync_gallery)
 from .web import WebClient
 
 
@@ -129,7 +130,8 @@ def run():
         print_profile(client, web, usernames[0])
         return
 
-    totals = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
+    totals = new_stats()
+    per_user = []
     for username in usernames:
         counts = sync_gallery(
             client, username, output_root,
@@ -143,16 +145,22 @@ def run():
                 sys.exit(f"{empty} is empty or the user does not exist.")
             print(f"Skipping {username}: the gallery is empty or the user no longer exists.\n")
             continue
-        for status, count in counts.items():
-            totals[status] += count
+        add_stats(totals, counts)
+        per_user.append((username, counts))
         print()
 
     if len(usernames) > 1:
-        print(
-            f"All users synced. Downloaded: {totals['downloaded']} "
-            f"| Skipped (already existed): {totals['skipped']} "
-            f"| No file: {totals['no_media']} | Failed: {totals['failed']}"
-        )
+        lines = summary_lines(totals, users=len(per_user))
+        print(f"All users synced. {lines[0]}")
+        for line in lines[1:]:
+            print(line)
+        if per_user:
+            width = max(len(name) for name, _ in per_user)
+            print("Per user:")
+            for name, counts in sorted(per_user, key=lambda uc: uc[1]["bytes"],
+                                       reverse=True):
+                print(f"  {name:<{width}}  {counts['downloaded']} item(s) "
+                      f"downloaded, {human_size(counts['bytes'])}")
 
 
 def main():

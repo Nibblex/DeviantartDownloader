@@ -327,6 +327,11 @@ class TestSyncAll:
         stdout = capsys.readouterr().out
         assert "syncing 2 previously downloaded user(s)" in stdout
         assert "All users synced. Downloaded: 2" in stdout
+        # The grand total breaks the downloads down by route and per user
+        assert "via API:     2 item(s)" in stdout
+        assert "Per user:" in stdout
+        assert "alice  1 item(s) downloaded" in stdout
+        assert "bob    1 item(s) downloaded" in stdout
 
     def test_empty_gallery_is_skipped_not_fatal(self, clean_cli_env, monkeypatch,
                                                 galleries, capsys):

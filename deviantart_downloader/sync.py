@@ -1,6 +1,7 @@
 """Orchestration: list a gallery, route each work, download the lot."""
 
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -12,6 +13,75 @@ from .manifest import DownloadManifest
 from .naming import deviation_key
 from .storage import read_json, write_json
 from .web import WebClient, needs_api
+
+STATUSES = ("downloaded", "skipped", "failed", "no_media", "cancelled")
+
+
+def human_size(nbytes: float) -> str:
+    """Format a byte count as a human-readable string (e.g. "45.3 MB")."""
+    size = float(nbytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def new_stats() -> dict:
+    """A fresh, zeroed statistics accumulator for one gallery or a whole run."""
+    stats = {status: 0 for status in STATUSES}
+    stats["bytes"] = 0
+    stats["elapsed"] = 0.0
+    stats["web"] = {"downloaded": 0, "bytes": 0}
+    stats["api"] = {"downloaded": 0, "bytes": 0}
+    return stats
+
+
+def add_stats(dest: dict, src: dict) -> None:
+    """Fold one gallery's stats into a running total (in place)."""
+    for status in STATUSES:
+        dest[status] += src[status]
+    dest["bytes"] += src["bytes"]
+    dest["elapsed"] += src["elapsed"]
+    for route in ("web", "api"):
+        dest[route]["downloaded"] += src[route]["downloaded"]
+        dest[route]["bytes"] += src[route]["bytes"]
+
+
+def summary_lines(stats: dict, *, users: int | None = None) -> list[str]:
+    """Build the detailed, multi-line summary shown at the end of a run.
+
+    The first line keeps the compact "Downloaded: N | Skipped ..." shape; the
+    indented lines below break the downloads down by route, with item counts
+    and total size, and add a few derived metrics (speed, average file size).
+    """
+    lines = [
+        f"Downloaded: {stats['downloaded']} "
+        f"| Skipped (already existed): {stats['skipped']} "
+        f"| No file: {stats['no_media']} | Failed: {stats['failed']}"
+    ]
+    if stats["cancelled"]:
+        lines[0] += f" | Cancelled: {stats['cancelled']}"
+
+    if stats["downloaded"]:
+        web, api = stats["web"], stats["api"]
+        lines.append(
+            f"  · via website: {web['downloaded']} item(s), "
+            f"{human_size(web['bytes'])}"
+        )
+        lines.append(
+            f"  · via API:     {api['downloaded']} item(s), "
+            f"{human_size(api['bytes'])}"
+        )
+        total = f"  · Total downloaded: {human_size(stats['bytes'])}"
+        elapsed = stats["elapsed"]
+        if elapsed >= 0.05:
+            total += f" in {elapsed:.1f}s ({human_size(stats['bytes'] / elapsed)}/s)"
+        total += f", avg {human_size(stats['bytes'] / stats['downloaded'])}/file"
+        if users:
+            total += f", across {users} user(s)"
+        lines.append(total)
+    return lines
 
 
 def discover_users(output_root: Path) -> list[str]:
@@ -116,10 +186,11 @@ def sync_gallery(
         ]
     write_json(meta_path, metadata)
 
-    counts = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
+    counts = new_stats()
     total = len(jobs)
     done = 0
     interrupted = False
+    started = time.monotonic()
 
     # Each route gets its own pool, so the website threads stay exclusive to
     # the website and the API runs at a lower, separate concurrency cap (the
@@ -135,15 +206,26 @@ def sync_gallery(
                 redownload_missing, unblur,
                 dest_dir=out_dir / subdir,
                 session=web.session if subdir == WEB_SUBDIR else None,
-                use_api=subdir == API_SUBDIR)] = dev
+                use_api=subdir == API_SUBDIR)] = (dev, subdir)
         try:
             for future in as_completed(futures):
                 done += 1
+                dev, subdir = futures[future]
                 try:
                     status, message = future.result()
                 except Exception as e:
                     status, message = "failed", f"Unexpected ERROR: {e}"
                 counts[status] += 1
+                if status == "downloaded":
+                    # The file's size comes off disk: the manifest records the
+                    # path this route wrote it to, keyed by the work's id.
+                    rel = manifest.filename_for(deviation_key(dev))
+                    dest = out_dir / rel if rel else None
+                    size = dest.stat().st_size if dest and dest.is_file() else 0
+                    route = "web" if subdir == WEB_SUBDIR else "api"
+                    counts[route]["downloaded"] += 1
+                    counts[route]["bytes"] += size
+                    counts["bytes"] += size
                 print(f"[{done}/{total}] {message}")
         except KeyboardInterrupt:
             interrupted = True
@@ -153,16 +235,17 @@ def sync_gallery(
             web_pool.shutdown(cancel_futures=True)
             api_pool.shutdown(cancel_futures=True)
 
-    summary = (
-        f"Downloaded: {counts['downloaded']} "
-        f"| Skipped (already existed): {counts['skipped']} "
-        f"| No file: {counts['no_media']} | Failed: {counts['failed']}"
-    )
+    counts["elapsed"] = time.monotonic() - started
+    lines = summary_lines(counts)
     if interrupted:
-        print(f"\nInterrupted ({done} of {total} works processed). {summary}")
+        print(f"\nInterrupted ({done} of {total} works processed). {lines[0]}")
+        for line in lines[1:]:
+            print(line)
         print(f"Files saved to: {out_dir.resolve()}")
         print("Run the same command again to resume where it left off.")
         sys.exit(130)
-    print(f"\nDone. {summary}")
+    print(f"\nDone. {lines[0]}")
+    for line in lines[1:]:
+        print(line)
     print(f"Files saved to: {out_dir.resolve()}")
     return counts
