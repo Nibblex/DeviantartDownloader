@@ -65,6 +65,21 @@ class TestEnvInt:
             config.env_int("TESTDD_INT", 7)
 
 
+class TestEnvFloat:
+    def test_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("TESTDD_FLOAT", raising=False)
+        assert config.env_float("TESTDD_FLOAT", 0.5) == 0.5
+
+    def test_reads_float(self, monkeypatch):
+        monkeypatch.setenv("TESTDD_FLOAT", " 1.5 ")
+        assert config.env_float("TESTDD_FLOAT", 0.5) == 1.5
+
+    def test_invalid_value_exits(self, monkeypatch):
+        monkeypatch.setenv("TESTDD_FLOAT", "banana")
+        with pytest.raises(SystemExit):
+            config.env_float("TESTDD_FLOAT", 0.5)
+
+
 class TestEnvBool:
     def test_default_when_unset(self, monkeypatch):
         monkeypatch.delenv("TESTDD_BOOL", raising=False)

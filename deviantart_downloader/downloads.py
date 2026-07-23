@@ -106,7 +106,8 @@ def process_deviation(
         return "skipped", f"Already exists, skipped: {rel}"
 
     ok = download_file(session, file_url, dest, fallback_url)
-    if delay:
+    if delay and use_api:
+        # Only the API route is throttled; the website route costs no quota.
         CANCEL.wait(delay)  # like time.sleep(delay), but wakes up on Ctrl+C
     if ok:
         if key:

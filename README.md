@@ -46,6 +46,9 @@ DA_CLIENT_ID=your_client_id
 DA_CLIENT_SECRET=your_client_secret
 # Optional: simultaneous downloads (default: 4, recommended not to exceed 8)
 DA_WORKERS=4
+# Optional: pause in seconds after each API download, per thread (default: 0.5);
+# the website route costs no quota and is never delayed
+DA_DELAY=0.5
 # Optional: strip the blur filter the API applies to mature-content previews
 # (default: false, images are kept as the API serves them)
 DA_UNBLUR=false
@@ -67,7 +70,7 @@ deviantart-downloader username --client-id XXX --client-secret YYY
 # Useful options:
 deviantart-downloader username -o my_folder   # output folder (default: DA_OUTPUT or downloads)
 deviantart-downloader username -w 8           # simultaneous downloads
-deviantart-downloader username --delay 1.0    # pause after each download, per thread
+deviantart-downloader username --delay 1.0    # pause after each API download, per thread
 deviantart-downloader username --redownload-missing  # restore manually deleted files
 deviantart-downloader username --unblur       # strip the blur on mature-content previews
 deviantart-downloader username --full         # walk the entire gallery listing

@@ -36,6 +36,17 @@ def env_int(name: str, default: int) -> int:
         sys.exit(f"The value of {name} must be an integer, not: {value!r}")
 
 
+def env_float(name: str, default: float) -> float:
+    """Read a float from an environment variable, with a default value."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        sys.exit(f"The value of {name} must be a number, not: {value!r}")
+
+
 def env_bool(name: str, default: bool) -> bool:
     """Read a boolean from an environment variable, with a default value."""
     value = os.environ.get(name, "").strip().lower()

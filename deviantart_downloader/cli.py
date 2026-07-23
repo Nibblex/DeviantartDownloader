@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .api import ApiError, DeviantArtClient
 from .auth import login
-from .config import env_bool, env_int, load_dotenv
+from .config import env_bool, env_float, env_int, load_dotenv
 from .naming import extract_username
 from .sync import discover_users, sync_gallery
 from .web import WebClient
@@ -36,8 +36,10 @@ def run():
                              "from .env or 'downloads')")
     parser.add_argument("--client-id", default=os.environ.get("DA_CLIENT_ID"))
     parser.add_argument("--client-secret", default=os.environ.get("DA_CLIENT_SECRET"))
-    parser.add_argument("--delay", type=float, default=0.5,
-                        help="Pause in seconds after each download, per thread (default: 0.5)")
+    parser.add_argument("--delay", type=float, default=env_float("DA_DELAY", 0.5),
+                        help="Pause in seconds after each API download, per thread "
+                             "(default: DA_DELAY from .env or 0.5). Website downloads "
+                             "cost no API quota and are never delayed")
     parser.add_argument("-w", "--workers", type=int, default=env_int("DA_WORKERS", 4),
                         help="Simultaneous downloads (default: DA_WORKERS from .env or 4, "
                              "recommended not to exceed 8)")

@@ -121,6 +121,30 @@ class TestProcessDeviation:
         assert ",blur_16" not in url
         assert fallback == blurred
 
+    def _spy_delay(self, monkeypatch):
+        """Record the delays passed to CANCEL.wait after a download."""
+        waited = []
+        monkeypatch.setattr(downloads, "download_file",
+                            lambda session, url, dest, fallback=None:
+                            (dest.write_bytes(b"x"), True)[1])
+        monkeypatch.setattr(downloads.CANCEL, "wait",
+                            lambda delay: waited.append(delay) or False)
+        return waited
+
+    def test_delay_throttles_the_api_route(self, tmp_path, manifest, monkeypatch):
+        waited = self._spy_delay(monkeypatch)
+        status, _ = downloads.process_deviation(
+            FakeClient(), make_dev(), tmp_path, 0.5, manifest, use_api=True)
+        assert status == "downloaded"
+        assert waited == [0.5]
+
+    def test_delay_skips_the_website_route(self, tmp_path, manifest, monkeypatch):
+        waited = self._spy_delay(monkeypatch)
+        status, _ = downloads.process_deviation(
+            FakeClient(), make_dev(), tmp_path, 0.5, manifest, use_api=False)
+        assert status == "downloaded"
+        assert waited == []
+
     def test_skips_already_downloaded(self, tmp_path, manifest):
         manifest.add(DEV_ID, "old name.png")
         (tmp_path / "old name.png").write_bytes(b"x")
