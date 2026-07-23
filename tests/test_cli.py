@@ -58,6 +58,61 @@ class TestRun:
         with pytest.raises(SystemExit, match="empty"):
             cli.run()
 
+    def test_info_without_profile_exits(self, clean_cli_env, monkeypatch):
+        set_argv(monkeypatch, "--client-id", "x", "--client-secret", "y", "--info")
+        with pytest.raises(SystemExit, match="--info needs a profile"):
+            cli.run()
+
+    def test_info_prints_and_downloads_nothing(self, clean_cli_env, monkeypatch):
+        seen = []
+        monkeypatch.setattr(cli, "print_profile",
+                            lambda client, web, username: seen.append(username))
+
+        def no_download(*a, **k):
+            raise AssertionError("--info must not download anything")
+
+        monkeypatch.setattr(downloads, "download_file", no_download)
+        monkeypatch.setattr(listing, "fetch_gallery", no_download)
+        set_argv(monkeypatch, "artist", "--client-id", "x", "--client-secret", "y",
+                 "--info")
+        cli.run()
+        assert seen == ["artist"]
+
+    def test_gallery_without_profile_exits(self, clean_cli_env, monkeypatch):
+        set_argv(monkeypatch, "--client-id", "x", "--client-secret", "y",
+                 "-g", "Sketches")
+        with pytest.raises(SystemExit, match="--gallery needs a profile"):
+            cli.run()
+
+    def test_gallery_flows_through_to_the_listing(self, clean_cli_env,
+                                                  monkeypatch, capsys):
+        seen = {}
+
+        def fake_fetch(client, username, **kw):
+            seen.update(kw)
+            return [make_dev()]
+
+        monkeypatch.setattr(listing, "fetch_gallery", fake_fetch)
+        monkeypatch.setattr(listing, "fetch_api_folders",
+                            lambda client, username: [{"folderid": "UUID",
+                                                       "name": "Sketches"}])
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0", "-g", "sketches")
+        cli.run()
+        assert seen["folder"] == "UUID"
+        assert 'Gallery folder: "sketches"' in capsys.readouterr().out
+
+    def test_unknown_gallery_exits_with_suggestions(self, clean_cli_env, monkeypatch):
+        monkeypatch.setattr(listing, "fetch_api_folders",
+                            lambda client, username: [{"folderid": "U",
+                                                       "name": "Sketches"}])
+        set_argv(monkeypatch, "artist", "--client-id", "x", "--client-secret", "y",
+                 "-g", "Nope")
+        with pytest.raises(listing.GalleryNotFoundError, match="Available folders"):
+            cli.run()
+
     def test_deactivated_profile_exits_gracefully(self, clean_cli_env,
                                                   monkeypatch, capsys):
         def gone(client, username, **kw):
@@ -346,6 +401,14 @@ class TestMain:
 
         monkeypatch.setattr(cli, "run", boom)
         with pytest.raises(SystemExit, match="rate limited forever"):
+            cli.main()
+
+    def test_gallery_not_found_exits_with_message(self, monkeypatch):
+        def boom():
+            raise listing.GalleryNotFoundError("artist", "Nope", ["Sketches"])
+
+        monkeypatch.setattr(cli, "run", boom)
+        with pytest.raises(SystemExit, match="no gallery folder named"):
             cli.main()
 
     def test_keyboard_interrupt_exits_130(self, monkeypatch, capsys):

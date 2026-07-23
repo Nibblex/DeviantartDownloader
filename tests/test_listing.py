@@ -1,5 +1,7 @@
 """Walking gallery listings over both routes, and pairing them up."""
 
+import pytest
+
 from deviantart_downloader import manifest as manifest_mod
 from deviantart_downloader import listing
 from deviantart_downloader import web as web_mod
@@ -119,7 +121,7 @@ class TestListGallery:
 
     def test_falls_back_to_the_api_when_the_website_breaks(self, capsys):
         class BrokenWeb(FakeWebClient):
-            def gallery_page(self, username, offset, limit):
+            def gallery_page(self, username, offset, limit, folderid=None):
                 raise web_mod.WebError("endpoint moved")
 
         client = FakeClient(pages=[{"results": [make_dev()], "has_more": False}])
@@ -135,6 +137,59 @@ class TestListGallery:
                                          manifest=None, full=False)
         assert from_web is False
         assert len(devs) == 1
+
+
+class TestFolderResolution:
+    def api_folders_client(self, extra_pages=()):
+        pages = [{"results": [
+            {"folderid": "UUID-SKETCH", "name": "Sketches"},
+            {"folderid": "UUID-FAN", "name": "Fan Art"},
+        ], "has_more": False}]
+        pages.extend(extra_pages)
+        return FakeClient(pages=pages)
+
+    def test_resolve_folder_api_matches_case_insensitively(self):
+        client = self.api_folders_client()
+        assert listing.resolve_folder_api(client, "artist", " sKeTcHeS ") == "UUID-SKETCH"
+        assert client.calls[0][0] == "gallery/folders"
+
+    def test_resolve_folder_api_unknown_name_lists_the_options(self):
+        client = self.api_folders_client()
+        with pytest.raises(listing.GalleryNotFoundError, match='"Sketches", "Fan Art"'):
+            listing.resolve_folder_api(client, "artist", "Nope")
+
+    def test_resolve_folder_web_returns_the_numeric_id(self):
+        web = FakeWebClient(folders=[{"folderId": 99, "name": "Sketches"}])
+        assert listing.resolve_folder_web(web, "artist", "sketches") == 99
+
+    def test_resolve_folder_web_unknown_name_raises(self):
+        web = FakeWebClient(folders=[{"folderId": 99, "name": "Sketches"}])
+        with pytest.raises(listing.GalleryNotFoundError, match="Nope"):
+            listing.resolve_folder_web(web, "artist", "Nope")
+
+    def test_fetch_gallery_targets_the_folder_endpoint(self):
+        client = FakeClient(pages=[{"results": [make_dev()], "has_more": False}])
+        listing.fetch_gallery(client, "artist", folder="UUID-X")
+        assert client.calls[0][0] == "gallery/UUID-X"
+
+    def test_gallery_name_lists_only_that_folder_on_the_web(self):
+        web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}],
+                            folders=[{"folderId": 99, "name": "Sketches"}])
+        devs, from_web = listing.list_gallery(FakeClient(), web, "artist",
+                                         manifest=None, full=False, gallery="sketches")
+        assert from_web is True and len(devs) == 1
+        assert web.calls[0][3] == 99   # the folderId reached gallery_page
+
+    def test_gallery_name_lists_only_that_folder_on_the_api(self):
+        client = FakeClient(pages=[
+            {"results": [{"folderid": "UUID", "name": "Sketches"}], "has_more": False},
+            {"results": [make_dev()], "has_more": False},
+        ])
+        devs, from_web = listing.list_gallery(client, None, "artist",
+                                         manifest=None, full=False, gallery="Sketches")
+        assert from_web is False and len(devs) == 1
+        assert client.calls[0][0] == "gallery/folders"
+        assert client.calls[1][0] == "gallery/UUID"
 
 
 class TestResolveViaApi:

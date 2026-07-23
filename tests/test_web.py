@@ -89,6 +89,32 @@ class TestWebClient:
         assert kwargs["params"]["offset"] == 0
         assert kwargs["params"]["username"] == "artist"
 
+    def test_gallery_page_targets_a_folder(self):
+        web = self.make([csrf_page(), FakeResponse(200, {"results": []})])
+        web.gallery_page("artist", 0, 60, folderid=72469)
+        params = web.session.get_calls[1][1]["params"]
+        assert params["folderid"] == 72469
+        assert "all_folder" not in params
+
+    def test_gallery_page_without_folder_lists_everything(self):
+        web = self.make([csrf_page(), FakeResponse(200, {"results": []})])
+        web.gallery_page("artist", 0, 60)
+        params = web.session.get_calls[1][1]["params"]
+        assert params["all_folder"] == "true"
+        assert "folderid" not in params
+
+    def test_list_folders_walks_pages(self):
+        web = self.make([
+            csrf_page(),
+            FakeResponse(200, {"results": [{"folderId": 1, "name": "A"}],
+                               "hasMore": True, "nextOffset": 60}),
+            FakeResponse(200, {"results": [{"folderId": 2, "name": "B"}],
+                               "hasMore": False}),
+        ])
+        folders = web.list_folders("artist")
+        assert [f["name"] for f in folders] == ["A", "B"]
+        assert web.session.get_calls[1][0] == web_mod.GALLECTION_FOLDERS_URL
+
     def test_csrf_is_fetched_once_and_reused(self):
         web = self.make([csrf_page(),
                          FakeResponse(200, {"results": []}),

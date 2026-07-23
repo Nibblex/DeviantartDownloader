@@ -8,7 +8,9 @@ from pathlib import Path
 from .api import ApiError, DeviantArtClient
 from .auth import login
 from .config import env_bool, env_float, env_int, load_dotenv
+from .listing import GalleryNotFoundError
 from .naming import extract_username
+from .profile import print_profile
 from .sync import discover_users, sync_gallery
 from .web import WebClient
 
@@ -26,6 +28,14 @@ def run():
              "username. If omitted, every user already downloaded to the "
              "output folder is synced with their latest works",
     )
+    parser.add_argument("-i", "--info", action="store_true",
+                        help="Show the profile's info (bio, location, birthday, "
+                             "links, statistics, galleries and their item counts) "
+                             "and exit without downloading anything. Requires a profile")
+    parser.add_argument("-g", "--gallery", metavar="NAME",
+                        help="Download only the gallery folder with this name "
+                             "(case-insensitive) instead of the whole gallery. "
+                             "Requires a profile")
     parser.add_argument("--login", action="store_true",
                         help="Log in with your DeviantArt account (OAuth) and save the "
                              "session. Mature works are then downloaded unblurred if "
@@ -75,6 +85,12 @@ def run():
     if args.api_workers < 1:
         sys.exit(f"The number of API workers must be at least 1 (got: {args.api_workers}).")
 
+    if args.gallery and not args.profile_url:
+        sys.exit("--gallery needs a profile: pass the username or URL of the "
+                 "gallery's owner.")
+    if args.info and not args.profile_url:
+        sys.exit("--info needs a profile: pass the username or URL to inspect.")
+
     if not args.client_id or not args.client_secret:
         sys.exit(
             "Missing API credentials.\n"
@@ -109,17 +125,22 @@ def run():
     if web is None:
         print("API-only mode: every work goes through the API.")
 
+    if args.info:
+        print_profile(client, web, usernames[0])
+        return
+
     totals = {"downloaded": 0, "skipped": 0, "failed": 0, "no_media": 0, "cancelled": 0}
     for username in usernames:
         counts = sync_gallery(
             client, username, output_root,
             delay=args.delay, web_workers=args.web_workers, api_workers=args.api_workers,
             redownload_missing=args.redownload_missing, unblur=args.unblur,
-            full=args.full, web=web,
+            full=args.full, web=web, gallery=args.gallery,
         )
         if counts is None:
             if args.profile_url:
-                sys.exit("The gallery is empty or the user does not exist.")
+                empty = f'The gallery "{args.gallery}"' if args.gallery else "The gallery"
+                sys.exit(f"{empty} is empty or the user does not exist.")
             print(f"Skipping {username}: the gallery is empty or the user no longer exists.\n")
             continue
         for status, count in counts.items():
@@ -137,7 +158,7 @@ def run():
 def main():
     try:
         run()
-    except ApiError as e:
+    except (ApiError, GalleryNotFoundError) as e:
         sys.exit(f"\n{e}")
     except KeyboardInterrupt:
         # Ctrl+C outside the download loop (login, gallery listing, ...)

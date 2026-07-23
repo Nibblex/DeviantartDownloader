@@ -15,6 +15,8 @@ PAGE_LIMIT = 24  # maximum allowed by the API
 
 WEB_BASE = "https://www.deviantart.com"
 GALLECTION_URL = f"{WEB_BASE}/_puppy/dashared/gallection/contents"
+GALLECTION_FOLDERS_URL = f"{WEB_BASE}/_puppy/dashared/gallection/folders"
+PROFILE_ABOUT_URL = f"{WEB_BASE}/_puppy/dauserprofile/init/about"
 WEB_PAGE_LIMIT = 60
 # The website's endpoints answer with a redirect to the app store or an empty
 # payload unless the request looks like it comes from a browser.

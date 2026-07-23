@@ -45,14 +45,17 @@ def sync_gallery(
     client: DeviantArtClient, username: str, output_root: Path, *,
     delay: float, web_workers: int, api_workers: int,
     redownload_missing: bool, unblur: bool,
-    full: bool = False, web: WebClient | None = None,
+    full: bool = False, web: WebClient | None = None, gallery: str | None = None,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
     or None when the gallery is empty / the user does not exist.
 
-    Exits with code 130 if the user interrupts with Ctrl+C.
+    With a gallery name only that folder is downloaded instead of the whole
+    gallery. Exits with code 130 if the user interrupts with Ctrl+C.
     """
     print(f"User: {username}")
+    if gallery:
+        print(f'Gallery folder: "{gallery}"')
     print("Fetching gallery listing...")
     out_dir = output_root / username
     # Loading the manifest before fetching lets the listing stop at the
@@ -73,7 +76,8 @@ def sync_gallery(
     listing_full = full or redownload_missing
     try:
         deviations, from_web = list_gallery(client, web, username,
-                                            manifest=manifest, full=listing_full)
+                                            manifest=manifest, full=listing_full,
+                                            gallery=gallery)
     except UserNotFoundError as e:
         # Deactivated or non-existent profile; treat it like an empty gallery
         # so the caller reports it and, when syncing many users, moves on.
@@ -94,7 +98,8 @@ def sync_gallery(
     if from_web and blocked:
         blocked = resolve_via_api(client, username, blocked, manifest=manifest,
                                   full=listing_full,
-                                  redownload_missing=redownload_missing)
+                                  redownload_missing=redownload_missing,
+                                  gallery=gallery)
     jobs = [(d, WEB_SUBDIR) for d in web_devs] + [(d, API_SUBDIR) for d in blocked]
     if from_web:
         print(f"Route: {len(web_devs)} via the website ({WEB_SUBDIR}/), "

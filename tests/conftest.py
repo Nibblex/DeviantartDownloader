@@ -131,14 +131,22 @@ class FakeClient:
 class FakeWebClient:
     """Scripted website listing: one dict per gallery page, in order."""
 
-    def __init__(self, pages=None):
+    def __init__(self, pages=None, folders=None, about=None):
         self.pages = list(pages or [])
+        self.folders = list(folders or [])
+        self.about = about
         self.calls = []
         self.session = FakeSession()
 
-    def gallery_page(self, username, offset, limit):
-        self.calls.append((username, offset, limit))
+    def gallery_page(self, username, offset, limit, folderid=None):
+        self.calls.append((username, offset, limit, folderid))
         return self.pages.pop(0)
+
+    def list_folders(self, username):
+        return self.folders
+
+    def profile_about(self, username):
+        return self.about
 
 
 # ---------------------------------------------------------------------------

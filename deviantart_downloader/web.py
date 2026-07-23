@@ -9,8 +9,9 @@ import threading
 
 import requests
 
-from .constants import (BROWSER_USER_AGENT, CANCEL, GALLECTION_URL, WEB_BASE,
-                        WEB_SUBDIR)
+from .constants import (BROWSER_USER_AGENT, CANCEL, GALLECTION_FOLDERS_URL,
+                        GALLECTION_URL, PROFILE_ABOUT_URL, WEB_BASE,
+                        WEB_PAGE_LIMIT, WEB_SUBDIR)
 
 
 class WebError(RuntimeError):
@@ -49,22 +50,15 @@ class WebClient:
             self._csrf = m.group(1)
             return self._csrf
 
-    def gallery_page(self, username: str, offset: int, limit: int) -> dict:
-        """One page of the gallery listing, in the website's own format."""
-        params = {
-            "username": username,
-            "type": "gallery",
-            "all_folder": "true",
-            "offset": offset,
-            "limit": limit,
-            "da_minor_version": "20230710",
-        }
+    def _web_json(self, username: str, url: str, params: dict) -> dict:
+        """GET a website JSON endpoint, renewing the CSRF token and retrying."""
+        params = dict(params)
         for attempt in range(3):
             params["csrf_token"] = self._ensure_csrf(username)
             try:
-                resp = self.session.get(GALLECTION_URL, params=params, timeout=30)
+                resp = self.session.get(url, params=params, timeout=30)
             except requests.RequestException as e:
-                raise WebError(f"gallery listing request failed: {e}") from e
+                raise WebError(f"website request failed: {e}") from e
             if resp.status_code == 400:
                 # Expired or rejected token: drop it and ask for a fresh one.
                 with self._csrf_lock:
@@ -77,12 +71,55 @@ class WebClient:
                     raise RuntimeError("Cancelled by the user")
                 continue
             if resp.status_code != 200:
-                raise WebError(f"gallery listing answered HTTP {resp.status_code}")
+                raise WebError(f"the website answered HTTP {resp.status_code}")
             try:
                 return resp.json()
             except ValueError as e:
-                raise WebError(f"gallery listing returned no JSON: {e}") from e
-        raise WebError("the gallery listing kept rejecting our requests")
+                raise WebError(f"the website returned no JSON: {e}") from e
+        raise WebError("the website endpoint kept rejecting our requests")
+
+    def gallery_page(self, username: str, offset: int, limit: int,
+                     folderid: object = None) -> dict:
+        """One page of a gallery listing, in the website's own format.
+
+        With folderid None the whole gallery is listed; otherwise only that
+        gallery folder (its numeric folderId, as returned by list_folders).
+        """
+        params = {
+            "username": username,
+            "type": "gallery",
+            "offset": offset,
+            "limit": limit,
+            "da_minor_version": "20230710",
+        }
+        if folderid is None:
+            params["all_folder"] = "true"
+        else:
+            params["folderid"] = folderid
+        return self._web_json(username, GALLECTION_URL, params)
+
+    def profile_about(self, username: str) -> dict:
+        """The website 'about' module: profile facts and user stats."""
+        return self._web_json(username, PROFILE_ABOUT_URL, {
+            "username": username, "da_minor_version": "20230710",
+        })
+
+    def list_folders(self, username: str) -> list[dict]:
+        """Every gallery folder of a user (name + numeric folderId)."""
+        folders, offset = [], 0
+        while True:
+            data = self._web_json(username, GALLECTION_FOLDERS_URL, {
+                "username": username,
+                "type": "gallery",
+                "offset": offset,
+                "limit": WEB_PAGE_LIMIT,
+                "da_minor_version": "20230710",
+            })
+            folders.extend(data.get("results", []))
+            if not data.get("hasMore"):
+                break
+            offset = data.get("nextOffset") or offset + WEB_PAGE_LIMIT
+        return folders
 
 
 def web_media_url(media: dict) -> str | None:

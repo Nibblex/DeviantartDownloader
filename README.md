@@ -71,6 +71,8 @@ deviantart-downloader username
 deviantart-downloader username --client-id XXX --client-secret YYY
 
 # Useful options:
+deviantart-downloader username --info         # show profile info + galleries, download nothing
+deviantart-downloader username -g "Sketches"  # only the named gallery folder (case-insensitive)
 deviantart-downloader username -o my_folder   # output folder (default: DA_OUTPUT or downloads)
 deviantart-downloader username -w 8           # simultaneous website downloads
 deviantart-downloader username --api-workers 3  # simultaneous API downloads (default: 2)
@@ -80,6 +82,10 @@ deviantart-downloader username --unblur       # strip the blur on mature-content
 deviantart-downloader username --full         # walk the entire gallery listing
 deviantart-downloader username --api-only     # route everything through the API
 ```
+
+Pass `-i/--info` to print a profile summary — bio, location, birthday, "deviant for X years", links, statistics and every gallery folder with its item count — and exit without downloading anything. DeviantArt does not expose pronouns through its endpoints, so those are not shown.
+
+Pass `-g/--gallery "NAME"` to download only one gallery folder instead of the whole gallery (the name is matched case-insensitively; if it doesn't exist the tool lists the folders that do). Files land in the same `<output>/<username>/` folder as a full sync, so works are never downloaded twice across runs.
 
 Files are saved to `<output>/<username>/web/` or `<output>/<username>/api/`, depending on the route each work took. The download record and the metadata live in `<output>/<username>/`, shared by both routes: a work is never downloaded twice, whichever route lists it.
 
