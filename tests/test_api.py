@@ -63,18 +63,22 @@ class TestDeviantArtClient:
         with pytest.raises(requests.HTTPError):
             client.api_get("gallery/all")
 
-    def test_api_get_raises_user_not_found_on_deactivated_profile(self, tmp_path):
+    @pytest.mark.parametrize("description", [
+        'User "ghost" not found.',       # profile never existed
+        "Account is inactive.",          # owner deactivated the account
+    ])
+    def test_api_get_raises_user_not_found_on_gone_profile(self, tmp_path,
+                                                           description):
         session = FakeSession(get_responses=[FakeResponse(
-            400, {"error": "invalid_request",
-                  "error_description": 'User "ghost" not found.'})])
+            400, {"error": "invalid_request", "error_description": description})])
         client = make_client(tmp_path, session)
-        with pytest.raises(api.UserNotFoundError, match="not found"):
+        with pytest.raises(api.UserNotFoundError, match="."):
             client.api_get("gallery/all", params={"username": "ghost"})
 
     def test_api_get_other_400_still_raises_http_error(self, tmp_path):
         session = FakeSession(get_responses=[FakeResponse(
             400, {"error": "invalid_request",
-                  "error_description": "Invalid offset."})])
+                  "error_description": "Request parameters are invalid."})])
         client = make_client(tmp_path, session)
         with pytest.raises(requests.HTTPError):
             client.api_get("gallery/all")

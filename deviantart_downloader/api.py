@@ -23,19 +23,25 @@ class UserNotFoundError(ApiError):
     """
 
 
-def _user_not_found(resp: requests.Response) -> str | None:
-    """The API's message when a 400 means the user is gone, else None.
+# Phrases the API puts in error_description when a profile cannot be listed
+# because it is gone: no longer exists, or its owner deactivated the account
+# (e.g. "Account is inactive.", "User \"x\" not found."). Any other 400 (a bad
+# parameter, say) carries a different description and is left to raise normally.
+_PROFILE_GONE_MARKERS = ("not found", "inactive", "deactivated", "deleted",
+                         "disabled", "banned", "suspended")
 
-    A deactivated or non-existent profile answers with a body like
-    {"error_description": "User \\"x\\" not found."}; any other 400 (a bad
-    parameter, say) carries a different description and is left to raise.
-    """
+
+def _user_not_found(resp: requests.Response) -> str | None:
+    """The API's message when a 400 means the profile is gone, else None."""
     try:
         body = resp.json()
     except ValueError:
         return None
     description = str(body.get("error_description") or "")
-    return description if "not found" in description.lower() else None
+    lowered = description.lower()
+    if any(marker in lowered for marker in _PROFILE_GONE_MARKERS):
+        return description
+    return None
 
 
 class DeviantArtClient:
