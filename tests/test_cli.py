@@ -28,6 +28,29 @@ class TestRun:
         with pytest.raises(SystemExit, match="at least 1"):
             cli.run()
 
+    def test_rejects_zero_api_workers(self, clean_cli_env, monkeypatch):
+        set_argv(monkeypatch, "someartist", "--client-id", "x",
+                 "--client-secret", "y", "--api-workers", "0")
+        with pytest.raises(SystemExit, match="at least 1"):
+            cli.run()
+
+    def test_separate_pools_sized_per_route(self, clean_cli_env, monkeypatch):
+        web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        sizes = []
+        real = sync.ThreadPoolExecutor
+        monkeypatch.setattr(sync, "ThreadPoolExecutor",
+                            lambda max_workers=None, **kw:
+                            (sizes.append(max_workers),
+                             real(max_workers=max_workers, **kw))[1])
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0", "-w", "5", "--api-workers", "3")
+        cli.run()
+        # The website pool is created first, then the API pool.
+        assert sizes == [5, 3]
+
     def test_empty_gallery_exits(self, clean_cli_env, monkeypatch):
         monkeypatch.setattr(listing, "fetch_gallery", lambda client, username, **kw: [])
         set_argv(monkeypatch, "someartist", "--client-id", "x",

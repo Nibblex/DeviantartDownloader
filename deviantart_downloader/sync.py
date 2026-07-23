@@ -43,7 +43,8 @@ def discover_users(output_root: Path) -> list[str]:
 
 def sync_gallery(
     client: DeviantArtClient, username: str, output_root: Path, *,
-    delay: float, workers: int, redownload_missing: bool, unblur: bool,
+    delay: float, web_workers: int, api_workers: int,
+    redownload_missing: bool, unblur: bool,
     full: bool = False, web: WebClient | None = None,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
@@ -115,15 +116,21 @@ def sync_gallery(
     done = 0
     interrupted = False
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {
-            pool.submit(process_deviation, client, dev, out_dir, delay, manifest,
-                        redownload_missing, unblur,
-                        dest_dir=out_dir / subdir,
-                        session=web.session if subdir == WEB_SUBDIR else None,
-                        use_api=subdir == API_SUBDIR): dev
-            for dev, subdir in jobs
-        }
+    # Each route gets its own pool, so the website threads stay exclusive to
+    # the website and the API runs at a lower, separate concurrency cap (the
+    # DA_API_WORKERS "semaphore") that keeps parallel API requests from
+    # tripping the rate limit.
+    with ThreadPoolExecutor(max_workers=web_workers) as web_pool, \
+         ThreadPoolExecutor(max_workers=api_workers) as api_pool:
+        futures = {}
+        for dev, subdir in jobs:
+            pool = api_pool if subdir == API_SUBDIR else web_pool
+            futures[pool.submit(
+                process_deviation, client, dev, out_dir, delay, manifest,
+                redownload_missing, unblur,
+                dest_dir=out_dir / subdir,
+                session=web.session if subdir == WEB_SUBDIR else None,
+                use_api=subdir == API_SUBDIR)] = dev
         try:
             for future in as_completed(futures):
                 done += 1
@@ -138,7 +145,8 @@ def sync_gallery(
             CANCEL.set()
             print("\nCtrl+C received: stopping downloads and cleaning up "
                   "partial files...")
-            pool.shutdown(cancel_futures=True)
+            web_pool.shutdown(cancel_futures=True)
+            api_pool.shutdown(cancel_futures=True)
 
     summary = (
         f"Downloaded: {counts['downloaded']} "

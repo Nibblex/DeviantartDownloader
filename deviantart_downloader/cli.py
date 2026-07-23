@@ -40,9 +40,15 @@ def run():
                         help="Pause in seconds after each API download, per thread "
                              "(default: DA_DELAY from .env or 0.5). Website downloads "
                              "cost no API quota and are never delayed")
-    parser.add_argument("-w", "--workers", type=int, default=env_int("DA_WORKERS", 4),
-                        help="Simultaneous downloads (default: DA_WORKERS from .env or 4, "
-                             "recommended not to exceed 8)")
+    parser.add_argument("-w", "--web-workers", type=int,
+                        default=env_int("DA_WEB_WORKERS", env_int("DA_WORKERS", 4)),
+                        help="Simultaneous website downloads (default: DA_WEB_WORKERS "
+                             "from .env or 4). The website route costs no API quota, so "
+                             "this can be high (recommended not to exceed 8)")
+    parser.add_argument("--api-workers", type=int, default=env_int("DA_API_WORKERS", 2),
+                        help="Simultaneous API downloads (default: DA_API_WORKERS from "
+                             ".env or 2). Kept low on purpose: the API is rate-limited, "
+                             "so fewer parallel requests avoid 429s")
     parser.add_argument("--api-only", action="store_true",
                         default=env_bool("DA_API_ONLY", False),
                         help="Route every work through the API instead of reading "
@@ -64,8 +70,10 @@ def run():
                              "after --login)")
     args = parser.parse_args()
 
-    if args.workers < 1:
-        sys.exit(f"The number of workers must be at least 1 (got: {args.workers}).")
+    if args.web_workers < 1:
+        sys.exit(f"The number of web workers must be at least 1 (got: {args.web_workers}).")
+    if args.api_workers < 1:
+        sys.exit(f"The number of API workers must be at least 1 (got: {args.api_workers}).")
 
     if not args.client_id or not args.client_secret:
         sys.exit(
@@ -105,7 +113,7 @@ def run():
     for username in usernames:
         counts = sync_gallery(
             client, username, output_root,
-            delay=args.delay, workers=args.workers,
+            delay=args.delay, web_workers=args.web_workers, api_workers=args.api_workers,
             redownload_missing=args.redownload_missing, unblur=args.unblur,
             full=args.full, web=web,
         )
