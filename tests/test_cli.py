@@ -158,8 +158,9 @@ class TestRun:
         api_entry = make_dev(
             url="https://www.deviantart.com/artist/art/Mature-Art-222222222",
             title="Mature Art")
-        monkeypatch.setattr(listing, "fetch_gallery",
-                            lambda client, username, **kw: [api_entry])
+        monkeypatch.setattr(listing, "_api_page",
+                            lambda client, endpoint, username, offset: {
+                                "results": [api_entry], "has_more": False})
         fetched = []
 
         def recording_download(session, url, dest, fallback=None):

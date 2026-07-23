@@ -14,7 +14,7 @@ Works are fetched through two routes, so the API quota is spent only on what the
 | Route | What it fetches | API quota |
 | --- | --- | --- |
 | `web/` | Every ordinary work, resolved straight from the website's public listing | none |
-| `api/` | Mature content, which the website only serves blurred to logged-out visitors | 1 listing walk + the download endpoint |
+| `api/` | Mature content, which the website only serves blurred to logged-out visitors | only the listing pages that hold mature works + the download endpoint |
 
 Each route saves to its own subfolder inside the gallery folder. `--api-only` restores the old behaviour of routing everything through the [official API](https://www.deviantart.com/developers/).
 

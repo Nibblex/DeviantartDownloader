@@ -96,8 +96,8 @@ def sync_gallery(
     web_devs = [d for d in deviations if not needs_api(d)]
     blocked = [d for d in deviations if needs_api(d)]
     if from_web and blocked:
-        blocked = resolve_via_api(client, username, blocked, manifest=manifest,
-                                  full=listing_full,
+        blocked = resolve_via_api(client, username, blocked, deviations,
+                                  manifest=manifest,
                                   redownload_missing=redownload_missing,
                                   gallery=gallery)
     jobs = [(d, WEB_SUBDIR) for d in web_devs] + [(d, API_SUBDIR) for d in blocked]

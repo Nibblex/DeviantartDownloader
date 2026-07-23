@@ -201,24 +201,55 @@ class TestResolveViaApi:
         blocked = self.blocked()
         api_entry = make_dev(url=blocked["url"], title="Mature Art")
         client = FakeClient(pages=[{"results": [api_entry], "has_more": False}])
-        resolved = listing.resolve_via_api(client, "artist", [blocked],
-                                      manifest=manifest, full=False,
-                                      redownload_missing=False)
+        resolved = listing.resolve_via_api(client, "artist", [blocked], [blocked],
+                                      manifest=manifest, redownload_missing=False)
         assert resolved == [api_entry]
+
+    def test_fetches_only_the_page_holding_the_blocked_work(self, tmp_path):
+        # A single mature work sitting deep in the listing is looked up from the
+        # one API page its position points at, not by walking the whole gallery.
+        manifest = manifest_mod.DownloadManifest(tmp_path)
+        blocked = self.blocked()
+        api_entry = make_dev(url=blocked["url"], title="Mature Art")
+        # 50 works ahead of it: position 50 -> API offset (50 // 24) * 24 == 48.
+        ordered = [make_dev(deviationid=str(i), url=f"x/art/a-{i}")
+                   for i in range(50)] + [blocked]
+        client = FakeClient(pages=[{"results": [api_entry], "has_more": True}])
+        resolved = listing.resolve_via_api(client, "artist", [blocked], ordered,
+                                      manifest=manifest, redownload_missing=False)
+        assert resolved == [api_entry]
+        assert len(client.calls) == 1
+        assert client.calls[0][1]["offset"] == 48
+
+    def test_gap_fill_walks_when_positions_do_not_line_up(self, tmp_path):
+        # The website order puts the work on page 0, but the API only serves it
+        # on a later page: the walk fills the gap instead of giving up.
+        manifest = manifest_mod.DownloadManifest(tmp_path)
+        blocked = self.blocked()
+        api_entry = make_dev(url=blocked["url"], title="Mature Art")
+        client = FakeClient(pages=[
+            {"results": [make_dev(deviationid="x", url="x/art/x-1")],
+             "has_more": True, "next_offset": 24},
+            {"results": [api_entry], "has_more": False},
+        ])
+        resolved = listing.resolve_via_api(client, "artist", [blocked], [blocked],
+                                      manifest=manifest, redownload_missing=False)
+        assert resolved == [api_entry]
+        assert [c[1]["offset"] for c in client.calls] == [0, 24]
 
     def test_no_api_call_when_everything_is_downloaded(self, tmp_path):
         manifest = manifest_mod.DownloadManifest(tmp_path)
         blocked = self.blocked()
         manifest.add(deviation_key(blocked), "api/Mature Art_222222222.jpg")
         client = FakeClient()
-        assert listing.resolve_via_api(client, "artist", [blocked], manifest=manifest,
-                                  full=False, redownload_missing=False) == []
+        assert listing.resolve_via_api(client, "artist", [blocked], [blocked],
+                                  manifest=manifest, redownload_missing=False) == []
         assert client.calls == []
 
     def test_warns_about_works_the_api_listing_did_not_return(self, tmp_path, capsys):
         manifest = manifest_mod.DownloadManifest(tmp_path)
+        blocked = self.blocked()
         client = FakeClient(pages=[{"results": [], "has_more": False}])
-        assert listing.resolve_via_api(client, "artist", [self.blocked()],
-                                  manifest=manifest, full=False,
-                                  redownload_missing=False) == []
+        assert listing.resolve_via_api(client, "artist", [blocked], [blocked],
+                                  manifest=manifest, redownload_missing=False) == []
         assert "were not in the API listing" in capsys.readouterr().out

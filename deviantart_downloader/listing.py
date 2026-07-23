@@ -170,9 +170,19 @@ def list_gallery(
                          manifest=manifest, full=full), False
 
 
+def _api_page(client: DeviantArtClient, endpoint: str, username: str,
+              offset: int) -> dict:
+    """One page of the API gallery listing at an exact offset."""
+    return client.api_get(endpoint, params={
+        "username": username, "offset": offset,
+        "limit": PAGE_LIMIT, "mature_content": "true",
+    })
+
+
 def resolve_via_api(
-    client: DeviantArtClient, username: str, blocked: list[dict], *,
-    manifest: DownloadManifest, full: bool, redownload_missing: bool,
+    client: DeviantArtClient, username: str, blocked: list[dict],
+    ordered: list[dict] | None = None, *,
+    manifest: DownloadManifest, redownload_missing: bool,
     gallery: str | None = None,
 ) -> list[dict]:
     """Look up the API entries of the works the website only serves blurred.
@@ -182,24 +192,67 @@ def resolve_via_api(
     gallery name is given). That listing is only walked when at least one
     blocked work still has to be downloaded, which keeps an incremental sync of
     an all-ages gallery entirely free of API calls.
+
+    Both routes list a gallery newest-first in the same order, so each blocked
+    work's position in `ordered` (the full website listing) points at the API
+    page that should hold it: only those pages are fetched, instead of walking
+    the whole gallery. Should the two orders drift apart, any work the targeted
+    pages missed is filled in by walking the remaining pages, stopping as soon
+    as every pending work is found.
     """
     pending = [d for d in blocked
                if redownload_missing or not manifest.has(deviation_key(d))]
     if not pending:
         return []
-    print(f"\n{len(pending)} mature work(s) need the API; fetching the API listing...")
+    print(f"\n{len(pending)} mature work(s) need the API; fetching the pages "
+          "that hold them...")
     folder = resolve_folder_api(client, username, gallery) if gallery else None
-    api_listing = fetch_gallery(client, username, folder=folder,
-                                manifest=manifest, full=full)
-    index = {deviation_key(d): d for d in api_listing}
-    resolved, missing = [], 0
-    for dev in pending:
-        match = index.get(deviation_key(dev))
-        if match is not None:
-            resolved.append(match)
-        else:
-            missing += 1
-    if missing:
-        print(f"  WARNING: {missing} mature work(s) were not in the API listing "
-              "(pass --full to walk it whole).")
+    endpoint = f"gallery/{folder}" if folder else "gallery/all"
+
+    index: dict[str, dict] = {}       # deviation key -> API entry
+    fetched: set[int] = set()         # page offsets already retrieved
+    terminal: list[int] = []          # offsets whose page reported no more
+
+    def absorb(offset: int) -> dict:
+        """Fetch one page (once), index its works and report the progress."""
+        data = _api_page(client, endpoint, username, offset)
+        fetched.add(offset)
+        if not data.get("has_more"):
+            terminal.append(offset)
+        results = data.get("results", [])
+        for r in results:
+            index.setdefault(deviation_key(r), r)
+        matched = sum(1 for d in pending if deviation_key(d) in index)
+        print(f"  Page at offset {offset}: {len(results)} works "
+              f"({matched}/{len(pending)} matched)")
+        return data
+
+    def missing() -> list[dict]:
+        return [d for d in pending if deviation_key(d) not in index]
+
+    # Pass 1: the pages the website positions point at.
+    position = {deviation_key(d): i for i, d in enumerate(ordered or [])}
+    wanted = sorted({(position[k] // PAGE_LIMIT) * PAGE_LIMIT
+                     for d in pending if (k := deviation_key(d)) in position})
+    for off in wanted:
+        absorb(off)
+
+    # Pass 2: fill the gaps left by any drift between the two orderings, walking
+    # the still-unseen pages until every pending work turns up or the listing
+    # ends. A page that reported no more works marks the end: nothing past the
+    # earliest such offset exists, so the walk never reaches for it.
+    offset = 0
+    while missing():
+        if terminal and offset > min(terminal):
+            break
+        if offset in fetched:
+            offset += PAGE_LIMIT
+            continue
+        data = absorb(offset)
+        offset = data.get("next_offset") or offset + PAGE_LIMIT
+
+    resolved = [index[k] for d in pending if (k := deviation_key(d)) in index]
+    if len(resolved) < len(pending):
+        print(f"  WARNING: {len(pending) - len(resolved)} mature work(s) were "
+              "not in the API listing.")
     return resolved
