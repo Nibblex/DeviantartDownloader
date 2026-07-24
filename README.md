@@ -121,7 +121,7 @@ Files are saved to `<output>/<username>/web/` or `<output>/<username>/api/`, dep
 
 Galleries downloaded by earlier versions keep their existing flat layout; those files are recognised and left where they are, and only new works land in the route subfolders.
 
-While it is fetching the listing or downloading, and when run in a terminal, you can steer it from the keyboard: **`p`** pauses, **`r`** resumes, and **`q`** quits (like `Ctrl+C`: it stops and cleans up, and re-running resumes where it left off). Each keypress prints an indicator. When the output is piped or redirected, these controls are simply inactive.
+While it is fetching the listing or downloading, and when run in a terminal, you can steer it from the keyboard: **`p`** pauses, **`r`** resumes, and **`q`** quits (like `Ctrl+C`: it stops and cleans up, and re-running resumes where it left off). A status line pinned to the bottom of the terminal shows the available keys and the current state, and the output scrolls above it. When the output is piped or redirected, these controls are simply inactive.
 
 When re-syncing a user, the gallery listing (newest first) stops at the first page whose works were all downloaded before, so frequent re-runs stay cheap even on huge galleries. Pass `--full` occasionally to walk the whole listing and pick up older works that became visible later (for example mature content after `--login`); `--redownload-missing` implies it.
 

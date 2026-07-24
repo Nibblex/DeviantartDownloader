@@ -23,33 +23,38 @@ def _wait_until(pred, timeout=2.0):
 class TestApplyKey:
     def test_p_pauses_and_r_resumes(self):
         assert RESUME.is_set()
-        msg = controls.apply_key("p")
-        assert "Paused" in msg and not RESUME.is_set()
-        msg = controls.apply_key("r")
-        assert "Resumed" in msg and RESUME.is_set()
+        assert controls.apply_key("p") is True and not RESUME.is_set()
+        assert controls.apply_key("r") is True and RESUME.is_set()
 
     def test_keys_are_case_insensitive(self):
-        controls.apply_key("P")
-        assert not RESUME.is_set()
-        controls.apply_key("R")
-        assert RESUME.is_set()
+        assert controls.apply_key("P") is True and not RESUME.is_set()
+        assert controls.apply_key("R") is True and RESUME.is_set()
 
     def test_pause_when_already_paused_is_a_no_op(self):
         controls.apply_key("p")
-        assert controls.apply_key("p") is None
+        assert controls.apply_key("p") is False
 
     def test_resume_when_running_is_a_no_op(self):
-        assert controls.apply_key("r") is None
+        assert controls.apply_key("r") is False
 
     def test_q_cancels_and_wakes_paused_workers(self):
         controls.apply_key("p")
-        msg = controls.apply_key("q")
-        assert "Quitting" in msg
+        assert controls.apply_key("q") is True
         assert CANCEL.is_set()
         assert RESUME.is_set()            # paused workers are released to abort
 
     def test_unknown_key_is_ignored(self):
-        assert controls.apply_key("x") is None
+        assert controls.apply_key("x") is False
+
+
+class TestFooterText:
+    def test_reflects_the_run_state(self):
+        assert "running" in controls.footer_text()
+        assert "pause" in controls.footer_text()
+        controls.apply_key("p")
+        assert "PAUSED" in controls.footer_text()
+        controls.apply_key("q")
+        assert "quitting" in controls.footer_text()
 
 
 class TestWaitIfPaused:
@@ -85,6 +90,39 @@ class TestWaitIfPaused:
         t.join()
 
 
+class TestFooterWriter:
+    def test_pins_footer_below_each_line(self):
+        buf = io.StringIO()
+        w = controls._FooterWriter(buf)
+        w.set_footer("FOOT")
+        w.write("hello\n")
+        w.write("world\n")
+        out = buf.getvalue()
+        assert "hello\n" in out and "world\n" in out
+        assert "\x1b[2K" in out           # the footer line is cleared each time
+        assert out.endswith("FOOT")       # footer ends up pinned at the bottom
+
+    def test_partial_writes_buffer_until_newline(self):
+        buf = io.StringIO()
+        w = controls._FooterWriter(buf)
+        w.write("ab")                     # no newline yet: nothing emitted
+        assert "ab" not in buf.getvalue()
+        w.write("c\n")
+        assert "abc\n" in buf.getvalue()
+
+    def test_clear_footer_erases_the_line(self):
+        buf = io.StringIO()
+        w = controls._FooterWriter(buf)
+        w.set_footer("F")
+        w.clear_footer()
+        assert buf.getvalue().endswith("\r\x1b[2K")
+
+    def test_delegates_unknown_attributes_to_the_stream(self):
+        buf = io.StringIO()
+        w = controls._FooterWriter(buf)
+        assert w.getvalue() == ""         # delegated to StringIO
+
+
 class FakeTTY:
     """Minimal readable, always-ready stream for driving the listener loop."""
 
@@ -107,15 +145,12 @@ class TestKeyboardControls:
         with controls.KeyboardControls(stream=io.StringIO("pq")) as kc:
             assert kc.active is False
 
-    def test_listen_processes_keys_until_quit(self, monkeypatch, capsys):
+    def test_listen_processes_keys_until_quit(self, monkeypatch):
         monkeypatch.setattr(controls.select, "select",
                             lambda r, w, x, t: (r, [], []))   # always ready
         kc = controls.KeyboardControls(stream=FakeTTY(["p", "q"]))
         kc._listen()                        # returns when 'q' is read
-
-        assert CANCEL.is_set()
-        out = capsys.readouterr().out
-        assert "Paused" in out and "Quitting" in out
+        assert CANCEL.is_set()              # 'p' then 'q' were both applied
 
     @pytest.mark.skipif(not controls._HAS_TERMIOS, reason="POSIX terminal only")
     def test_real_pty_pause_resume_quit(self):
