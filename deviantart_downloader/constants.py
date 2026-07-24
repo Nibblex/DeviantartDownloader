@@ -30,5 +30,22 @@ BROWSER_USER_AGENT = (
 WEB_SUBDIR = "web"
 API_SUBDIR = "api"
 
-# Set on Ctrl+C so worker threads abort in-progress downloads promptly.
+# Set on Ctrl+C (or the 'q' key) so worker threads abort in-progress
+# downloads promptly.
 CANCEL = threading.Event()
+
+# Cleared to pause the download workers, set to let them run (see controls.py).
+# It starts set: downloads run unless the user presses 'p'.
+RESUME = threading.Event()
+RESUME.set()
+
+
+def wait_if_paused() -> None:
+    """Block a worker thread while the run is paused.
+
+    Polls rather than waiting outright so a cancel (Ctrl+C or 'q') always wakes
+    the thread within a fraction of a second, even if it was paused: the caller
+    checks CANCEL right after and aborts.
+    """
+    while not RESUME.is_set() and not CANCEL.is_set():
+        RESUME.wait(0.2)

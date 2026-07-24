@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .api import DeviantArtClient, UserNotFoundError
 from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR
+from .controls import KeyboardControls
 from .downloads import process_deviation
 from .listing import list_gallery, resolve_via_api
 from .literature import is_text_work
@@ -218,7 +219,8 @@ def sync_gallery(
     # the website and the API runs at a lower, separate concurrency cap (the
     # DA_API_WORKERS "semaphore") that keeps parallel API requests from
     # tripping the rate limit.
-    with ThreadPoolExecutor(max_workers=web_workers) as web_pool, \
+    with KeyboardControls(), \
+         ThreadPoolExecutor(max_workers=web_workers) as web_pool, \
          ThreadPoolExecutor(max_workers=api_workers) as api_pool:
         futures = {}
         for dev, subdir in jobs:
@@ -250,6 +252,11 @@ def sync_gallery(
                     counts[route]["bytes"] += size
                     counts["bytes"] += size
                 print(f"[{done}/{total}] {message}")
+                if CANCEL.is_set():           # the user pressed 'q'
+                    interrupted = True
+                    web_pool.shutdown(cancel_futures=True)
+                    api_pool.shutdown(cancel_futures=True)
+                    break
         except KeyboardInterrupt:
             interrupted = True
             CANCEL.set()

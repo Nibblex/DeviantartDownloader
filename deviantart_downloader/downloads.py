@@ -6,7 +6,7 @@ import requests
 
 from . import literature
 from .api import DeviantArtClient
-from .constants import CANCEL
+from .constants import CANCEL, wait_if_paused
 from .literature import KIND_HTML, KIND_TEXT, classify_web_html, is_text_work
 from .manifest import DownloadManifest
 from .naming import (deviation_key, deviation_suffix, guess_extension,
@@ -29,6 +29,7 @@ def download_file(
             resp.raise_for_status()
             with open(tmp, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=1 << 16):
+                    wait_if_paused()      # pauses mid-download when the user asks
                     if CANCEL.is_set():
                         tmp.unlink(missing_ok=True)
                         return False
@@ -124,6 +125,7 @@ def process_deviation(
     dest_dir = dest_dir or out_dir
     session = session or client.session
 
+    wait_if_paused()                      # hold queued works while paused
     if CANCEL.is_set():
         return "cancelled", f"Cancelled: {title}"
 

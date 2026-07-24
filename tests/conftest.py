@@ -17,7 +17,7 @@ import requests
 
 from deviantart_downloader import cli
 from deviantart_downloader.api import DeviantArtClient
-from deviantart_downloader.constants import CANCEL
+from deviantart_downloader.constants import CANCEL, RESUME
 
 DEV_ID = "abcd1234-5678-90ab-cdef-1234567890ab"
 
@@ -28,10 +28,12 @@ BASE_URI = "https://images-wixmp-abc.wixmp.com/f/uuid/file.jpg"
 
 @pytest.fixture(autouse=True)
 def fresh_cancel():
-    """Every module shares one CANCEL event, so clear it around each test."""
+    """Every module shares the CANCEL/RESUME events; reset them around each test."""
     CANCEL.clear()
+    RESUME.set()
     yield
     CANCEL.clear()
+    RESUME.set()
 
 
 class OfflineSession:
