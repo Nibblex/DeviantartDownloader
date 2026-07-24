@@ -1,11 +1,33 @@
 """Writing a work to disk, and everything that decides where it goes."""
 
+import json
+
 import requests
 
 from deviantart_downloader import downloads
+from deviantart_downloader import web as web_mod
 from deviantart_downloader.constants import CANCEL
 
 from .conftest import DEV_ID, FakeClient, FakeResponse, FakeSession, make_dev
+
+
+def _tiptap(text):
+    """A minimal tiptap `html` object whose body is a single line of text."""
+    return {"type": "tiptap", "markup": json.dumps(
+        {"document": {"content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": text}]}]}})}
+
+
+class FakeWeb:
+    """Stand-in WebClient exposing only deviation_text, for text works."""
+
+    def __init__(self, text_content):
+        self.text_content = text_content
+        self.calls = []
+
+    def deviation_text(self, deviationid, username):
+        self.calls.append((deviationid, username))
+        return self.text_content
 
 
 class TestDownloadFile:
@@ -200,3 +222,104 @@ class TestProcessDeviation:
         status, _ = downloads.process_deviation(
             FakeClient(), make_dev(), tmp_path, 0, manifest)
         assert status == "cancelled"
+
+
+class TestLiteratureDownload:
+    def _lit_dev(self, **overrides):
+        dev = {
+            "deviationid": "1260299235",
+            "title": "My Poem",
+            "url": "https://www.deviantart.com/artist/art/My-Poem-1260299235",
+            "type": "literature",
+            "content": None,
+            "excerpt": "short excerpt",
+        }
+        dev.update(overrides)
+        return dev
+
+    def test_web_route_writes_the_full_body(self, tmp_path, manifest):
+        web = FakeWeb({"html": _tiptap("Full body"), "excerpt": "short excerpt"})
+        status, msg = downloads.process_deviation(
+            FakeClient(), self._lit_dev(), tmp_path, 0, manifest,
+            dest_dir=tmp_path / "web", use_api=False, web=web)
+        assert status == "downloaded"
+        assert "text" in msg
+        dest = tmp_path / "web" / "My Poem_1260299235.txt"
+        assert dest.read_text(encoding="utf-8") == "Full body\n"
+        assert manifest.filename_for("1260299235") == "web/My Poem_1260299235.txt"
+
+    def test_web_route_writes_an_html_document(self, tmp_path, manifest):
+        web = FakeWeb({"html": _tiptap("Full body")})
+        status, _ = downloads.process_deviation(
+            FakeClient(), self._lit_dev(), tmp_path, 0, manifest,
+            dest_dir=tmp_path / "web", use_api=False, web=web, text_format="html")
+        assert status == "downloaded"
+        dest = tmp_path / "web" / "My Poem_1260299235.html"
+        content = dest.read_text(encoding="utf-8")
+        assert content.startswith("<!DOCTYPE html>")
+        assert "<title>My Poem</title>" in content
+        assert "<p>Full body</p>" in content
+        assert manifest.filename_for("1260299235") == "web/My Poem_1260299235.html"
+
+    def test_web_route_falls_back_to_excerpt_when_body_empty(self, tmp_path, manifest):
+        web = FakeWeb({"html": {}, "excerpt": "just the excerpt"})
+        status, _ = downloads.process_deviation(
+            FakeClient(), self._lit_dev(), tmp_path, 0, manifest,
+            dest_dir=tmp_path / "web", use_api=False, web=web)
+        assert status == "downloaded"
+        dest = tmp_path / "web" / "My Poem_1260299235.txt"
+        assert dest.read_text(encoding="utf-8") == "just the excerpt\n"
+
+    def test_web_error_falls_back_to_the_listing_excerpt(self, tmp_path, manifest):
+        class Boom(FakeWeb):
+            def deviation_text(self, deviationid, username):
+                raise web_mod.WebError("unavailable")
+
+        status, _ = downloads.process_deviation(
+            FakeClient(), self._lit_dev(), tmp_path, 0, manifest,
+            dest_dir=tmp_path / "web", use_api=False, web=Boom(None))
+        assert status == "downloaded"
+        dest = tmp_path / "web" / "My Poem_1260299235.txt"
+        assert dest.read_text(encoding="utf-8") == "short excerpt\n"
+
+    def test_api_route_uses_the_content_endpoint(self, tmp_path, manifest):
+        dev = {"deviationid": DEV_ID, "title": "Api Lit", "url": "",
+               "excerpt": "fallback", "content": None}
+        client = FakeClient(pages=[{"html": "<p>API body</p>"}])
+        status, _ = downloads.process_deviation(
+            client, dev, tmp_path, 0, manifest,
+            dest_dir=tmp_path / "api", use_api=True)
+        assert status == "downloaded"
+        assert client.calls[0][0] == "deviation/content"
+        dest = tmp_path / "api" / f"Api Lit_{DEV_ID[:8]}.txt"
+        assert dest.read_text(encoding="utf-8") == "API body\n"
+
+    def test_api_route_falls_back_to_excerpt(self, tmp_path, manifest):
+        dev = {"deviationid": DEV_ID, "title": "Api Lit", "url": "",
+               "excerpt": "fallback excerpt", "content": None}
+        client = FakeClient(pages=[{"html": ""}])       # editor format: empty
+        status, _ = downloads.process_deviation(
+            client, dev, tmp_path, 0, manifest,
+            dest_dir=tmp_path / "api", use_api=True)
+        assert status == "downloaded"
+        dest = tmp_path / "api" / f"Api Lit_{DEV_ID[:8]}.txt"
+        assert dest.read_text(encoding="utf-8") == "fallback excerpt\n"
+
+    def test_no_text_anywhere_is_no_media(self, tmp_path, manifest):
+        dev = {"deviationid": DEV_ID, "title": "Nothing", "url": "",
+               "type": "literature", "content": None}
+        client = FakeClient(pages=[{"html": ""}])
+        status, msg = downloads.process_deviation(
+            client, dev, tmp_path, 0, manifest, use_api=True)
+        assert status == "no_media"
+        assert not manifest.has(DEV_ID)
+
+    def test_rerun_skips_text_via_manifest(self, tmp_path, manifest):
+        dev = self._lit_dev()
+        web = FakeWeb({"html": _tiptap("Body")})
+        downloads.process_deviation(FakeClient(), dev, tmp_path, 0, manifest,
+                                    dest_dir=tmp_path / "web", use_api=False, web=web)
+        status, msg = downloads.process_deviation(
+            FakeClient(), dev, tmp_path, 0, manifest,
+            dest_dir=tmp_path / "web", use_api=False, web=FakeWeb({"html": _tiptap("Body")}))
+        assert status == "skipped"

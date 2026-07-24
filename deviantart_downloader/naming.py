@@ -29,6 +29,16 @@ def extract_username(profile_url: str) -> str:
     sys.exit(f"Could not extract a username from: {profile_url}")
 
 
+def username_from_url(url: str) -> str:
+    """The username in a deviation/profile URL, or "" if there is none.
+
+    Unlike extract_username this never exits: it is a best-effort helper for
+    code paths where a missing username is recoverable.
+    """
+    parts = [p for p in urlparse(url or "").path.split("/") if p]
+    return parts[0] if parts else ""
+
+
 _URL_ID_RE = re.compile(r"-(\d+)$")
 
 

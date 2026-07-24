@@ -37,8 +37,8 @@ Usage:
   deviantart-downloader username --api-only
 
 The modules are layered bottom-up: constants and config depend on nothing,
-naming and manifest on those, api and web wrap one route each, listing and
-downloads use both, and sync and cli sit on top.
+naming, manifest and literature on those, api and web wrap one route each,
+listing and downloads use both, and sync and cli sit on top.
 """
 
 import sys

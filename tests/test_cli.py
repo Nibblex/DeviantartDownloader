@@ -148,6 +148,102 @@ class TestRun:
         assert "Downloaded: 1" in stdout
         assert "No file: 1" in stdout
 
+    def test_downloads_literature_as_text(self, clean_cli_env, monkeypatch, capsys):
+        lit = web_item(
+            deviationId=1260299235, title="My Poem", type="literature",
+            url="https://www.deviantart.com/artist/art/My-Poem-1260299235",
+            textContent={"excerpt": "short"})
+        body = json.dumps({"document": {"content": [
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "The full poem"}]}]}})
+        web = FakeWebClient(
+            pages=[{"results": [lit], "hasMore": False}],
+            texts={"1260299235": {"html": {"type": "tiptap", "markup": body}}})
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--delay", "0", "-w", "1")
+        cli.run()
+
+        dest = out / "artist" / "web" / "My Poem_1260299235.txt"
+        assert dest.read_text(encoding="utf-8") == "The full poem\n"
+        assert "Downloaded: 1" in capsys.readouterr().out
+
+    def test_only_images_skips_literature(self, clean_cli_env, monkeypatch, capsys):
+        img = web_item()                                   # an image work
+        lit = web_item(deviationId=1260299235, title="My Poem", type="literature",
+                       url="https://www.deviantart.com/artist/art/My-Poem-1260299235")
+        web = FakeWebClient(pages=[{"results": [img, lit], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "-w", "1", "--only", "images")
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        cli.run()
+
+        gallery = out / "artist"
+        assert (gallery / "web" / "Web Art_1004952679.jpg").is_file()
+        assert not list((gallery / "web").glob("*.txt"))
+        stdout = capsys.readouterr().out
+        assert "skipped 1 literature/journals" in stdout
+
+    def test_only_literature_skips_images(self, clean_cli_env, monkeypatch, capsys):
+        img = web_item()
+        lit = web_item(deviationId=1260299235, title="My Poem", type="literature",
+                       url="https://www.deviantart.com/artist/art/My-Poem-1260299235")
+        body = json.dumps({"document": {"content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Poem"}]}]}})
+        web = FakeWebClient(
+            pages=[{"results": [img, lit], "hasMore": False}],
+            texts={"1260299235": {"html": {"type": "tiptap", "markup": body}}})
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "-w", "1", "--only", "literature")
+        cli.run()
+
+        gallery = out / "artist"
+        assert (gallery / "web" / "My Poem_1260299235.txt").is_file()
+        assert not list((gallery / "web").glob("*.jpg"))
+        assert "skipped 1 images" in capsys.readouterr().out
+
+    def test_only_with_no_matches_is_not_fatal(self, clean_cli_env, monkeypatch, capsys):
+        web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "-w", "1", "--only", "literature")
+        cli.run()                                          # no SystemExit
+        assert "No literature to download" in capsys.readouterr().out
+        assert not (out / "artist" / "web").exists()
+
+    def test_literature_format_html_saves_a_document(self, clean_cli_env,
+                                                     monkeypatch, capsys):
+        lit = web_item(
+            deviationId=1260299235, title="My Poem", type="literature",
+            url="https://www.deviantart.com/artist/art/My-Poem-1260299235")
+        body = json.dumps({"document": {"content": [
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "The full poem"}]}]}})
+        web = FakeWebClient(
+            pages=[{"results": [lit], "hasMore": False}],
+            texts={"1260299235": {"html": {"type": "tiptap", "markup": body}}})
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "-w", "1", "--literature-format", "html")
+        cli.run()
+
+        dest = out / "artist" / "web" / "My Poem_1260299235.html"
+        content = dest.read_text(encoding="utf-8")
+        assert content.startswith("<!DOCTYPE html>")
+        assert "<p>The full poem</p>" in content
+        assert not (out / "artist" / "web" / "My Poem_1260299235.txt").exists()
+
     def test_routes_each_source_into_its_own_folder(self, clean_cli_env,
                                                     monkeypatch, capsys):
         web = FakeWebClient(pages=[

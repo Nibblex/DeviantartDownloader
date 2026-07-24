@@ -52,6 +52,12 @@ class TestNormalizeWebDeviation:
         dev = web_mod.normalize_web_deviation(web_item(type="literature"))
         assert dev["content"] is None
 
+    def test_carries_type_and_excerpt_for_text_works(self):
+        dev = web_mod.normalize_web_deviation(web_item(
+            type="literature", textContent={"excerpt": "a poem"}))
+        assert dev["type"] == "literature"
+        assert dev["excerpt"] == "a poem"
+
     def test_keeps_block_information(self):
         dev = web_mod.normalize_web_deviation(blocked_web_item())
         assert dev["is_blocked"] is True
@@ -102,6 +108,19 @@ class TestWebClient:
         params = web.session.get_calls[1][1]["params"]
         assert params["all_folder"] == "true"
         assert "folderid" not in params
+
+    def test_deviation_text_returns_the_text_content(self):
+        web = self.make([csrf_page(), FakeResponse(200, {"deviation": {
+            "textContent": {"excerpt": "e", "html": {"type": "tiptap", "markup": "{}"}}}})])
+        tc = web.deviation_text(1260299235, "artist")
+        assert tc["excerpt"] == "e"
+        url, kwargs = web.session.get_calls[1]
+        assert url == web_mod.DEVIATION_INIT_URL
+        assert kwargs["params"]["deviationid"] == 1260299235
+
+    def test_deviation_text_without_content_is_empty(self):
+        web = self.make([csrf_page(), FakeResponse(200, {"deviation": {}})])
+        assert web.deviation_text(1, "artist") == {}
 
     def test_list_folders_walks_pages(self):
         web = self.make([

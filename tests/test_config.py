@@ -80,6 +80,21 @@ class TestEnvFloat:
             config.env_float("TESTDD_FLOAT", 0.5)
 
 
+class TestEnvChoice:
+    def test_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("TESTDD_FMT", raising=False)
+        assert config.env_choice("TESTDD_FMT", "txt", ("txt", "html")) == "txt"
+
+    def test_reads_and_lowercases_a_valid_choice(self, monkeypatch):
+        monkeypatch.setenv("TESTDD_FMT", " HTML ")
+        assert config.env_choice("TESTDD_FMT", "txt", ("txt", "html")) == "html"
+
+    def test_invalid_value_exits(self, monkeypatch):
+        monkeypatch.setenv("TESTDD_FMT", "pdf")
+        with pytest.raises(SystemExit):
+            config.env_choice("TESTDD_FMT", "txt", ("txt", "html"))
+
+
 class TestEnvBool:
     def test_default_when_unset(self, monkeypatch):
         monkeypatch.delenv("TESTDD_BOOL", raising=False)

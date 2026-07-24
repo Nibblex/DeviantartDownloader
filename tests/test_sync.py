@@ -18,6 +18,24 @@ class TestHumanSize:
         assert sync.human_size(4096 * 1024 ** 4).endswith("TB")
 
 
+class TestFilterByContent:
+    IMG = {"content": {"src": "x"}}
+    LIT = {"type": "literature", "content": None}
+
+    def test_none_keeps_everything(self):
+        devs = [self.IMG, self.LIT]
+        kept, dropped = sync.filter_by_content(devs, None)
+        assert kept == devs and dropped == 0
+
+    def test_images_only_drops_text(self):
+        kept, dropped = sync.filter_by_content([self.IMG, self.LIT, self.IMG], "images")
+        assert kept == [self.IMG, self.IMG] and dropped == 1
+
+    def test_literature_only_drops_images(self):
+        kept, dropped = sync.filter_by_content([self.IMG, self.LIT], "literature")
+        assert kept == [self.LIT] and dropped == 1
+
+
 class TestAddStats:
     def test_folds_routes_and_totals(self):
         totals = sync.new_stats()

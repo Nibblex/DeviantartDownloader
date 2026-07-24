@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deviantart-gallery-downloader"
-version = "1.11.0"
+version = "1.12.0"
 description = "Download full DeviantArt galleries, sparing the API quota for mature content"
 readme = "README.md"
 license = "GPL-3.0-or-later"

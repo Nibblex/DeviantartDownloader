@@ -9,12 +9,26 @@ from .api import DeviantArtClient, UserNotFoundError
 from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR
 from .downloads import process_deviation
 from .listing import list_gallery, resolve_via_api
+from .literature import is_text_work
 from .manifest import DownloadManifest
 from .naming import deviation_key
 from .storage import read_json, write_json
 from .web import WebClient, needs_api
 
 STATUSES = ("downloaded", "skipped", "failed", "no_media", "cancelled")
+
+
+def filter_by_content(deviations: list[dict], only: str | None) -> tuple[list[dict], int]:
+    """Keep only images or only literature, per `only`. Returns (kept, dropped).
+
+    With `only` None nothing is filtered. "images" keeps works with a media
+    file (drops literature/journals); "literature" keeps text works only.
+    """
+    if only not in ("images", "literature"):
+        return deviations, 0
+    want_text = only == "literature"
+    kept = [d for d in deviations if is_text_work(d) == want_text]
+    return kept, len(deviations) - len(kept)
 
 
 def human_size(nbytes: float) -> str:
@@ -116,6 +130,7 @@ def sync_gallery(
     delay: float, web_workers: int, api_workers: int,
     redownload_missing: bool, unblur: bool,
     full: bool = False, web: WebClient | None = None, gallery: str | None = None,
+    text_format: str = "txt", only: str | None = None,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
     or None when the gallery is empty / the user does not exist.
@@ -155,6 +170,13 @@ def sync_gallery(
         return None
     if not deviations:
         return None
+    deviations, dropped = filter_by_content(deviations, only)
+    if dropped:
+        other = "literature/journals" if only == "images" else "images"
+        print(f"  Content filter (--only {only}): skipped {dropped} {other}.")
+    if not deviations:
+        print(f"No {only} to download in this gallery.")
+        return new_stats()
     print(f"\nTotal works found: {len(deviations)}\n")
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -206,7 +228,8 @@ def sync_gallery(
                 redownload_missing, unblur,
                 dest_dir=out_dir / subdir,
                 session=web.session if subdir == WEB_SUBDIR else None,
-                use_api=subdir == API_SUBDIR)] = (dev, subdir)
+                use_api=subdir == API_SUBDIR, web=web,
+                text_format=text_format)] = (dev, subdir)
         try:
             for future in as_completed(futures):
                 done += 1

@@ -47,6 +47,17 @@ def env_float(name: str, default: float) -> float:
         sys.exit(f"The value of {name} must be a number, not: {value!r}")
 
 
+def env_choice(name: str, default: str, choices: tuple[str, ...]) -> str:
+    """Read one of a fixed set of values from an environment variable."""
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    if value in choices:
+        return value
+    sys.exit(f"The value of {name} must be one of {', '.join(choices)}, "
+             f"not: {value!r}")
+
+
 def env_bool(name: str, default: bool) -> bool:
     """Read a boolean from an environment variable, with a default value."""
     value = os.environ.get(name, "").strip().lower()

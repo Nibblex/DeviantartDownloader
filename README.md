@@ -19,6 +19,7 @@ Works are fetched through two routes, so the API quota is spent only on what the
 Each route saves to its own subfolder inside the gallery folder. `--api-only` restores the old behaviour of routing everything through the [official API](https://www.deviantart.com/developers/).
 
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
+- Downloads literature and journals too: text works have no media file, so their full body is saved next to the images as plain text (`.txt`) or a standalone HTML document (`.html`), your choice with `--literature-format`. The body is fetched from the website for no API quota, falling back to the listing excerpt when it is unavailable. Restrict a run to one kind of work with `--only images` or `--only literature`.
 - Downloads mature content unblurred when you log in with your account (`--login`, see below). Without login, `--unblur`/`DA_UNBLUR=true` strips the blur where possible: works uploaded since ~mid-2021 have their URL token pinned to the blurred version, so for those the blurred preview is downloaded instead.
 - Parallel downloads with retries and API rate-limit handling. The website route needs no OAuth call at all, so a re-sync of an all-ages gallery costs zero API requests.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
@@ -26,6 +27,7 @@ Each route saves to its own subfolder inside the gallery folder. `--api-only` re
 - Re-syncs are incremental: the gallery listing stops as soon as it reaches a page of already-downloaded works (`--full` forces a complete walk).
 - Files you delete manually stay deleted: the download record (`_downloaded.json`) is authoritative, so deleted works are not downloaded again unless you pass `--redownload-missing`.
 - Saves the full metadata of every work to `_metadata.json`.
+- Ends every run with a summary broken down by route and size (items and MB downloaded via the website vs. the API), plus a per-user breakdown when syncing several profiles.
 
 ## Installation
 
@@ -55,6 +57,12 @@ DA_DELAY=0.5
 # Optional: strip the blur filter the API applies to mature-content previews
 # (default: false, images are kept as the API serves them)
 DA_UNBLUR=false
+# Optional: file format for literature and journals — "txt" (plain text) or
+# "html" (a standalone document that keeps the formatting) (default: txt)
+DA_LITERATURE_FORMAT=txt
+# Optional: download only one kind of work — "images" or "literature"
+# (default: unset, which downloads both)
+DA_ONLY=
 # Optional: output folder, absolute or relative ("~" is expanded)
 DA_OUTPUT=~/Pictures/deviantart
 # Optional: route every work through the API instead of the website listing
@@ -79,15 +87,37 @@ deviantart-downloader username --api-workers 3  # simultaneous API downloads (de
 deviantart-downloader username --delay 1.0    # pause after each API download, per thread
 deviantart-downloader username --redownload-missing  # restore manually deleted files
 deviantart-downloader username --unblur       # strip the blur on mature-content previews
+deviantart-downloader username --literature-format html  # save literature/journals as .html (default: txt)
+deviantart-downloader username --only images       # download only images (skip literature/journals)
+deviantart-downloader username --only literature    # download only literature/journals
 deviantart-downloader username --full         # walk the entire gallery listing
 deviantart-downloader username --api-only     # route everything through the API
+```
+
+### Try it on a demo profile
+
+[`test`](https://www.deviantart.com/test) is a small, long-standing public profile that makes a good first run: one gallery, 18 all-ages works (~4.5 MB), nothing mature, so no `--login` is needed.
+
+```bash
+deviantart-downloader test --info     # inspect it first: profile + gallery counts
+deviantart-downloader test -o demo     # download all 18 works into ./demo/test/
+```
+
+Every run ends with a summary broken down by route, size and (when syncing several users) per user:
+
+```
+Done. Downloaded: 18 | Skipped (already existed): 0 | No file: 0 | Failed: 0
+  · via website: 18 item(s), 4.5 MB
+  · via API:     0 item(s), 0 B
+  · Total downloaded: 4.5 MB in 3.7s (1.2 MB/s), avg 257.5 KB/file
+Files saved to: /.../demo/test
 ```
 
 Pass `-i/--info` to print a profile summary — bio, location, birthday, "deviant for X years", links, statistics and every gallery folder with its item count — and exit without downloading anything. DeviantArt does not expose pronouns through its endpoints, so those are not shown.
 
 Pass `-g/--gallery "NAME"` to download only one gallery folder instead of the whole gallery (the name is matched case-insensitively; if it doesn't exist the tool lists the folders that do). Files land in the same `<output>/<username>/` folder as a full sync, so works are never downloaded twice across runs.
 
-Files are saved to `<output>/<username>/web/` or `<output>/<username>/api/`, depending on the route each work took. The download record and the metadata live in `<output>/<username>/`, shared by both routes: a work is never downloaded twice, whichever route lists it.
+Files are saved to `<output>/<username>/web/` or `<output>/<username>/api/`, depending on the route each work took. Literature and journals land in the same subfolders as a `.txt` or `.html` file (see `--literature-format`). The download record and the metadata live in `<output>/<username>/`, shared by both routes: a work is never downloaded twice, whichever route lists it.
 
 Galleries downloaded by earlier versions keep their existing flat layout; those files are recognised and left where they are, and only new works land in the route subfolders.
 
@@ -137,11 +167,12 @@ The package is layered bottom-up, each module depending only on the ones above i
 | `config.py` | `.env` files and `DA_*` environment variables |
 | `naming.py` | Usernames, file names, and the deviation key shared by both routes |
 | `manifest.py` | `_downloaded.json`: what has been fetched, and where it landed |
+| `literature.py` | Rendering a text work's body (tiptap/HTML) to plain text |
 | `api.py` | The OAuth2 client: tokens, retries, rate limits |
 | `web.py` | The website's JSON endpoints and their media URLs |
 | `auth.py` | The interactive `--login` flow |
 | `listing.py` | Walking a gallery over either route, and pairing the two up |
-| `downloads.py` | Resolving a work to a file URL and writing it to disk |
+| `downloads.py` | Resolving a work to a file (or text) and writing it to disk |
 | `sync.py` | Orchestration: list, route, download |
 | `cli.py` | Argument parsing and the entry point |
 

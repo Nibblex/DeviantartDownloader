@@ -131,10 +131,11 @@ class FakeClient:
 class FakeWebClient:
     """Scripted website listing: one dict per gallery page, in order."""
 
-    def __init__(self, pages=None, folders=None, about=None):
+    def __init__(self, pages=None, folders=None, about=None, texts=None):
         self.pages = list(pages or [])
         self.folders = list(folders or [])
         self.about = about
+        self.texts = texts or {}          # deviationid -> textContent dict
         self.calls = []
         self.session = FakeSession()
 
@@ -147,6 +148,9 @@ class FakeWebClient:
 
     def profile_about(self, username):
         return self.about
+
+    def deviation_text(self, deviationid, username):
+        return self.texts.get(str(deviationid), {})
 
 
 # ---------------------------------------------------------------------------

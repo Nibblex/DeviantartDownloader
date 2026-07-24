@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .api import ApiError, DeviantArtClient
 from .auth import login
-from .config import env_bool, env_float, env_int, load_dotenv
+from .config import env_bool, env_choice, env_float, env_int, load_dotenv
 from .listing import GalleryNotFoundError
 from .naming import extract_username
 from .profile import print_profile
@@ -69,6 +69,17 @@ def run():
                         default=env_bool("DA_UNBLUR", False),
                         help="Strip the blur filter the API applies to mature-content "
                              "previews (default: keep the blur, or DA_UNBLUR from .env)")
+    parser.add_argument("--literature-format", choices=["txt", "html"],
+                        default=env_choice("DA_LITERATURE_FORMAT", "txt", ("txt", "html")),
+                        help="File format for literature and journals, which have no "
+                             "media file (default: DA_LITERATURE_FORMAT from .env or "
+                             "'txt'). 'txt' saves the plain text; 'html' saves a "
+                             "standalone HTML document that keeps the formatting")
+    parser.add_argument("--only", choices=["images", "literature"],
+                        default=env_choice("DA_ONLY", "", ("images", "literature")),
+                        help="Download only one kind of work (default: both). "
+                             "'images' skips literature and journals; 'literature' "
+                             "downloads only text works. Also DA_ONLY in .env")
     parser.add_argument("--redownload-missing", action="store_true",
                         help="Download again works recorded in the manifest whose local "
                              "file is missing (by default, manually deleted files are "
@@ -138,6 +149,7 @@ def run():
             delay=args.delay, web_workers=args.web_workers, api_workers=args.api_workers,
             redownload_missing=args.redownload_missing, unblur=args.unblur,
             full=args.full, web=web, gallery=args.gallery,
+            text_format=args.literature_format, only=args.only or None,
         )
         if counts is None:
             if args.profile_url:

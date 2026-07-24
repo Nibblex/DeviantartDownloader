@@ -9,9 +9,9 @@ import threading
 
 import requests
 
-from .constants import (BROWSER_USER_AGENT, CANCEL, GALLECTION_FOLDERS_URL,
-                        GALLECTION_URL, PROFILE_ABOUT_URL, WEB_BASE,
-                        WEB_PAGE_LIMIT, WEB_SUBDIR)
+from .constants import (BROWSER_USER_AGENT, CANCEL, DEVIATION_INIT_URL,
+                        GALLECTION_FOLDERS_URL, GALLECTION_URL,
+                        PROFILE_ABOUT_URL, WEB_BASE, WEB_PAGE_LIMIT, WEB_SUBDIR)
 
 
 class WebError(RuntimeError):
@@ -104,6 +104,19 @@ class WebClient:
             "username": username, "da_minor_version": "20230710",
         })
 
+    def deviation_text(self, deviationid: object, username: str) -> dict:
+        """The `textContent` of a text work (excerpt + full body markup).
+
+        The gallery listing only carries the excerpt; the deviation page, which
+        this reads, carries the whole body. Costs no API quota. Returns {} when
+        the work has no text content.
+        """
+        data = self._web_json(username, DEVIATION_INIT_URL, {
+            "deviationid": deviationid, "username": username, "type": "art",
+            "include_session": "false", "da_minor_version": "20230710",
+        })
+        return (data.get("deviation") or {}).get("textContent") or {}
+
     def list_folders(self, username: str) -> list[dict]:
         """Every gallery folder of a user (name + numeric folderId)."""
         folders, offset = [], 0
@@ -160,12 +173,14 @@ def normalize_web_deviation(item: dict) -> dict:
         "deviationid": str(item.get("deviationId") or ""),
         "title": item.get("title") or "untitled",
         "url": item.get("url") or "",
+        "type": item.get("type"),
         "published_time": item.get("publishedTime"),
         "is_mature": bool(item.get("isMature")),
         "is_downloadable": bool(item.get("isDownloadable")),
         "is_blocked": bool(item.get("isBlocked")),
         "block_reasons": list(item.get("blockReasons") or []),
         "content": {"src": src} if src else None,
+        "excerpt": (item.get("textContent") or {}).get("excerpt"),
         "_source": WEB_SUBDIR,
     }
 
