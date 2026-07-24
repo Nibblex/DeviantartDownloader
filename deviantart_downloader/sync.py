@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .api import DeviantArtClient, UserNotFoundError
-from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR
+from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR, CancelledByUser
 from .controls import KeyboardControls
 from .downloads import process_deviation
 from .listing import list_gallery, resolve_via_api
@@ -179,7 +179,9 @@ def sync_gallery(
             # so the caller reports it and, when syncing many users, moves on.
             print(f"  {e}")
             return None
-        if CANCEL.is_set():                   # 'q' during the listing
+        except CancelledByUser:               # 'q' during a rate-limit wait
+            _quit_before_download()
+        if CANCEL.is_set():                   # 'q' between listing pages
             _quit_before_download()
         if not deviations:
             return None
@@ -201,10 +203,13 @@ def sync_gallery(
         web_devs = [d for d in deviations if not needs_api(d)]
         blocked = [d for d in deviations if needs_api(d)]
         if from_web and blocked:
-            blocked = resolve_via_api(client, username, blocked, deviations,
-                                      manifest=manifest,
-                                      redownload_missing=redownload_missing,
-                                      gallery=gallery)
+            try:
+                blocked = resolve_via_api(client, username, blocked, deviations,
+                                          manifest=manifest,
+                                          redownload_missing=redownload_missing,
+                                          gallery=gallery)
+            except CancelledByUser:           # 'q' during a rate-limit wait
+                _quit_before_download()
         if CANCEL.is_set():                   # 'q' during the mature-work lookup
             _quit_before_download()
         jobs = [(d, WEB_SUBDIR) for d in web_devs] + [(d, API_SUBDIR) for d in blocked]

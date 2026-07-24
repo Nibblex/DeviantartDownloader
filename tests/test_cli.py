@@ -5,7 +5,7 @@ import json
 import pytest
 
 from deviantart_downloader import api, cli, downloads, listing, sync
-from deviantart_downloader.constants import CANCEL
+from deviantart_downloader.constants import CANCEL, CancelledByUser
 
 from .conftest import (BASE_URI, DEV_ID, FakeWebClient, blocked_web_item,
                        fake_download, make_dev, make_user_dir, set_argv,
@@ -187,6 +187,24 @@ class TestRun:
         assert excinfo.value.code == 130
         assert "Stopped before downloading" in capsys.readouterr().out
         assert called == []                    # nothing was downloaded
+
+    def test_quit_during_api_lookup_exits_cleanly(self, clean_cli_env,
+                                                   monkeypatch, capsys):
+        # A cancel during the mature-work API lookup surfaces as CancelledByUser;
+        # it must exit 130 cleanly, not crash with a traceback.
+        web = FakeWebClient(pages=[{"results": [blocked_web_item()], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+
+        def boom(*a, **k):
+            raise CancelledByUser("Cancelled by the user")
+
+        monkeypatch.setattr(sync, "resolve_via_api", boom)
+        set_argv(monkeypatch, "artist", "--web", "-o", str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y")
+        with pytest.raises(SystemExit) as excinfo:
+            cli.run()
+        assert excinfo.value.code == 130
+        assert "Stopped before downloading" in capsys.readouterr().out
 
     def test_only_images_skips_literature(self, clean_cli_env, monkeypatch, capsys):
         img = web_item()                                   # an image work

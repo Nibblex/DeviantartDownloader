@@ -8,7 +8,8 @@ from pathlib import Path
 
 import requests
 
-from .constants import API_BASE, CANCEL, TOKEN_FILE, TOKEN_URL, USER_AGENT
+from .constants import (API_BASE, CANCEL, CancelledByUser, TOKEN_FILE,
+                        TOKEN_URL, USER_AGENT)
 
 
 class ApiError(RuntimeError):
@@ -138,7 +139,7 @@ class DeviantArtClient:
                 backoff = min(backoff * 2, 300)
                 print(f"  Rate limit reached, waiting {wait} s...")
                 if CANCEL.wait(wait):
-                    raise RuntimeError("Cancelled by the user")
+                    raise CancelledByUser("Cancelled by the user")
                 continue
             if resp.status_code == 400 and (detail := _user_not_found(resp)):
                 raise UserNotFoundError(detail)

@@ -11,7 +11,8 @@ import requests
 
 from .constants import (BROWSER_USER_AGENT, CANCEL, DEVIATION_INIT_URL,
                         GALLECTION_FOLDERS_URL, GALLECTION_URL,
-                        PROFILE_ABOUT_URL, WEB_BASE, WEB_PAGE_LIMIT, WEB_SUBDIR)
+                        PROFILE_ABOUT_URL, WEB_BASE, WEB_PAGE_LIMIT, WEB_SUBDIR,
+                        CancelledByUser)
 
 
 class WebError(RuntimeError):
@@ -68,7 +69,7 @@ class WebClient:
                 wait = 5 * (attempt + 1)
                 print(f"  Website throttling the listing, waiting {wait} s...")
                 if CANCEL.wait(wait):
-                    raise RuntimeError("Cancelled by the user")
+                    raise CancelledByUser("Cancelled by the user")
                 continue
             if resp.status_code != 200:
                 raise WebError(f"the website answered HTTP {resp.status_code}")

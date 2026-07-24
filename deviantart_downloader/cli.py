@@ -8,6 +8,7 @@ from pathlib import Path
 from .api import ApiError, DeviantArtClient
 from .auth import login
 from .config import env_bool, env_choice, env_float, env_int, load_dotenv
+from .constants import CancelledByUser
 from .listing import GalleryNotFoundError
 from .naming import extract_username
 from .profile import print_profile
@@ -180,7 +181,7 @@ def main():
         run()
     except (ApiError, GalleryNotFoundError) as e:
         sys.exit(f"\n{e}")
-    except KeyboardInterrupt:
-        # Ctrl+C outside the download loop (login, gallery listing, ...)
+    except (KeyboardInterrupt, CancelledByUser):
+        # Ctrl+C or 'q' outside the download loop (login, gallery listing, ...)
         print("\nInterrupted by the user.")
         sys.exit(130)

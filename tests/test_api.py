@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from deviantart_downloader import api
-from deviantart_downloader.constants import API_BASE, CANCEL
+from deviantart_downloader.constants import API_BASE, CANCEL, CancelledByUser
 
 from .conftest import FakeResponse, FakeSession, make_client, token_response
 
@@ -115,5 +115,5 @@ class TestDeviantArtClient:
         ])
         client = make_client(tmp_path, session)
         CANCEL.set()
-        with pytest.raises(RuntimeError, match="Cancelled"):
+        with pytest.raises(CancelledByUser):
             client.api_get("gallery/all")

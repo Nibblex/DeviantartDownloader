@@ -30,6 +30,14 @@ BROWSER_USER_AGENT = (
 WEB_SUBDIR = "web"
 API_SUBDIR = "api"
 
+class CancelledByUser(RuntimeError):
+    """A blocking wait was aborted because the user asked to stop (q / Ctrl+C).
+
+    Raised by the API/website clients when a rate-limit wait is cut short by
+    CANCEL, so the caller can exit cleanly instead of crashing with a traceback.
+    """
+
+
 # Set on Ctrl+C (or the 'q' key) so worker threads abort in-progress
 # downloads promptly.
 CANCEL = threading.Event()

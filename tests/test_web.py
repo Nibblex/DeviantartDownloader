@@ -3,7 +3,7 @@
 import pytest
 
 from deviantart_downloader import web as web_mod
-from deviantart_downloader.constants import WEB_SUBDIR
+from deviantart_downloader.constants import CANCEL, WEB_SUBDIR, CancelledByUser
 
 from .conftest import (BASE_URI, WEB_ID, WEB_URL, FakeResponse, FakeSession, csrf_page,
                        blocked_web_item, make_dev, web_item)
@@ -169,4 +169,10 @@ class TestWebClient:
     def test_persistent_rejection_gives_up(self):
         web = self.make([csrf_page(), FakeResponse(400)] * 3)
         with pytest.raises(web_mod.WebError, match="kept rejecting"):
+            web.gallery_page("artist", 0, 60)
+
+    def test_429_wait_aborts_on_cancel(self):
+        web = self.make([csrf_page(), FakeResponse(429)])
+        CANCEL.set()
+        with pytest.raises(CancelledByUser):
             web.gallery_page("artist", 0, 60)
