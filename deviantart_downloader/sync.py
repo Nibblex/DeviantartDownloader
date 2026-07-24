@@ -19,6 +19,13 @@ from .web import WebClient, needs_api
 STATUSES = ("downloaded", "skipped", "failed", "no_media", "cancelled")
 
 
+def _quit_before_download() -> None:
+    """Exit after 'q' was pressed during listing/routing, before any download."""
+    print("\nStopped before downloading (nothing to clean up). "
+          "Run the same command again to resume.")
+    sys.exit(130)
+
+
 def filter_by_content(deviations: list[dict], only: str | None) -> tuple[list[dict], int]:
     """Keep only images or only literature, per `only`. Returns (kept, dropped).
 
@@ -160,110 +167,116 @@ def sync_gallery(
                   "routes recognise them.")
 
     listing_full = full or redownload_missing
-    try:
-        deviations, from_web = list_gallery(client, web, username,
-                                            manifest=manifest, full=listing_full,
-                                            gallery=gallery)
-    except UserNotFoundError as e:
-        # Deactivated or non-existent profile; treat it like an empty gallery
-        # so the caller reports it and, when syncing many users, moves on.
-        print(f"  {e}")
-        return None
-    if not deviations:
-        return None
-    deviations, dropped = filter_by_content(deviations, only)
-    if dropped:
-        other = "literature/journals" if only == "images" else "images"
-        print(f"  Content filter (--only {only}): skipped {dropped} {other}.")
-    if not deviations:
-        print(f"No {only} to download in this gallery.")
-        return new_stats()
-    print(f"\nTotal works found: {len(deviations)}\n")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if manifest is None:
-        manifest = DownloadManifest(out_dir)
-
-    # Route each work: whatever the website serves in full goes through the
-    # website, the rest (mature content) through the API.
-    web_devs = [d for d in deviations if not needs_api(d)]
-    blocked = [d for d in deviations if needs_api(d)]
-    if from_web and blocked:
-        blocked = resolve_via_api(client, username, blocked, deviations,
-                                  manifest=manifest,
-                                  redownload_missing=redownload_missing,
-                                  gallery=gallery)
-    jobs = [(d, WEB_SUBDIR) for d in web_devs] + [(d, API_SUBDIR) for d in blocked]
-    if from_web:
-        print(f"Route: {len(web_devs)} via the website ({WEB_SUBDIR}/), "
-              f"{len(blocked)} via the API ({API_SUBDIR}/).\n")
-
-    # Save the full metadata in case it is needed later. Merge with the
-    # previous file so works beyond the early stop point are kept.
-    metadata = deviations
-    if previous_meta:
-        fetched = {deviation_key(d) for d in deviations}
-        metadata = deviations + [
-            d for d in previous_meta
-            if isinstance(d, dict) and deviation_key(d) not in fetched
-        ]
-    write_json(meta_path, metadata)
-
-    counts = new_stats()
-    total = len(jobs)
-    done = 0
-    interrupted = False
-    started = time.monotonic()
-
-    # Each route gets its own pool, so the website threads stay exclusive to
-    # the website and the API runs at a lower, separate concurrency cap (the
-    # DA_API_WORKERS "semaphore") that keeps parallel API requests from
-    # tripping the rate limit.
-    with KeyboardControls(), \
-         ThreadPoolExecutor(max_workers=web_workers) as web_pool, \
-         ThreadPoolExecutor(max_workers=api_workers) as api_pool:
-        futures = {}
-        for dev, subdir in jobs:
-            pool = api_pool if subdir == API_SUBDIR else web_pool
-            futures[pool.submit(
-                process_deviation, client, dev, out_dir, delay, manifest,
-                redownload_missing, unblur,
-                dest_dir=out_dir / subdir,
-                session=web.session if subdir == WEB_SUBDIR else None,
-                use_api=subdir == API_SUBDIR, web=web,
-                text_format=text_format)] = (dev, subdir)
+    # The controls cover the whole job, so 'q' stops a long listing too and 'p'
+    # pauses it; the listing and routing loops watch CANCEL/RESUME themselves.
+    with KeyboardControls():
         try:
-            for future in as_completed(futures):
-                done += 1
-                dev, subdir = futures[future]
-                try:
-                    status, message = future.result()
-                except Exception as e:
-                    status, message = "failed", f"Unexpected ERROR: {e}"
-                counts[status] += 1
-                if status == "downloaded":
-                    # The file's size comes off disk: the manifest records the
-                    # path this route wrote it to, keyed by the work's id.
-                    rel = manifest.filename_for(deviation_key(dev))
-                    dest = out_dir / rel if rel else None
-                    size = dest.stat().st_size if dest and dest.is_file() else 0
-                    route = "web" if subdir == WEB_SUBDIR else "api"
-                    counts[route]["downloaded"] += 1
-                    counts[route]["bytes"] += size
-                    counts["bytes"] += size
-                print(f"[{done}/{total}] {message}")
-                if CANCEL.is_set():           # the user pressed 'q'
-                    interrupted = True
-                    web_pool.shutdown(cancel_futures=True)
-                    api_pool.shutdown(cancel_futures=True)
-                    break
-        except KeyboardInterrupt:
-            interrupted = True
-            CANCEL.set()
-            print("\nCtrl+C received: stopping downloads and cleaning up "
-                  "partial files...")
-            web_pool.shutdown(cancel_futures=True)
-            api_pool.shutdown(cancel_futures=True)
+            deviations, from_web = list_gallery(client, web, username,
+                                                manifest=manifest, full=listing_full,
+                                                gallery=gallery)
+        except UserNotFoundError as e:
+            # Deactivated or non-existent profile; treat it like an empty gallery
+            # so the caller reports it and, when syncing many users, moves on.
+            print(f"  {e}")
+            return None
+        if CANCEL.is_set():                   # 'q' during the listing
+            _quit_before_download()
+        if not deviations:
+            return None
+        deviations, dropped = filter_by_content(deviations, only)
+        if dropped:
+            other = "literature/journals" if only == "images" else "images"
+            print(f"  Content filter (--only {only}): skipped {dropped} {other}.")
+        if not deviations:
+            print(f"No {only} to download in this gallery.")
+            return new_stats()
+        print(f"\nTotal works found: {len(deviations)}\n")
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        if manifest is None:
+            manifest = DownloadManifest(out_dir)
+
+        # Route each work: whatever the website serves in full goes through the
+        # website, the rest (mature content) through the API.
+        web_devs = [d for d in deviations if not needs_api(d)]
+        blocked = [d for d in deviations if needs_api(d)]
+        if from_web and blocked:
+            blocked = resolve_via_api(client, username, blocked, deviations,
+                                      manifest=manifest,
+                                      redownload_missing=redownload_missing,
+                                      gallery=gallery)
+        if CANCEL.is_set():                   # 'q' during the mature-work lookup
+            _quit_before_download()
+        jobs = [(d, WEB_SUBDIR) for d in web_devs] + [(d, API_SUBDIR) for d in blocked]
+        if from_web:
+            print(f"Route: {len(web_devs)} via the website ({WEB_SUBDIR}/), "
+                  f"{len(blocked)} via the API ({API_SUBDIR}/).\n")
+
+        # Save the full metadata in case it is needed later. Merge with the
+        # previous file so works beyond the early stop point are kept.
+        metadata = deviations
+        if previous_meta:
+            fetched = {deviation_key(d) for d in deviations}
+            metadata = deviations + [
+                d for d in previous_meta
+                if isinstance(d, dict) and deviation_key(d) not in fetched
+            ]
+        write_json(meta_path, metadata)
+
+        counts = new_stats()
+        total = len(jobs)
+        done = 0
+        interrupted = False
+        started = time.monotonic()
+
+        # Each route gets its own pool, so the website threads stay exclusive to
+        # the website and the API runs at a lower, separate concurrency cap (the
+        # DA_API_WORKERS "semaphore") that keeps parallel API requests from
+        # tripping the rate limit.
+        with ThreadPoolExecutor(max_workers=web_workers) as web_pool, \
+             ThreadPoolExecutor(max_workers=api_workers) as api_pool:
+            futures = {}
+            for dev, subdir in jobs:
+                pool = api_pool if subdir == API_SUBDIR else web_pool
+                futures[pool.submit(
+                    process_deviation, client, dev, out_dir, delay, manifest,
+                    redownload_missing, unblur,
+                    dest_dir=out_dir / subdir,
+                    session=web.session if subdir == WEB_SUBDIR else None,
+                    use_api=subdir == API_SUBDIR, web=web,
+                    text_format=text_format)] = (dev, subdir)
+            try:
+                for future in as_completed(futures):
+                    done += 1
+                    dev, subdir = futures[future]
+                    try:
+                        status, message = future.result()
+                    except Exception as e:
+                        status, message = "failed", f"Unexpected ERROR: {e}"
+                    counts[status] += 1
+                    if status == "downloaded":
+                        # The file's size comes off disk: the manifest records
+                        # the path this route wrote it to, keyed by the work's id.
+                        rel = manifest.filename_for(deviation_key(dev))
+                        dest = out_dir / rel if rel else None
+                        size = dest.stat().st_size if dest and dest.is_file() else 0
+                        route = "web" if subdir == WEB_SUBDIR else "api"
+                        counts[route]["downloaded"] += 1
+                        counts[route]["bytes"] += size
+                        counts["bytes"] += size
+                    print(f"[{done}/{total}] {message}")
+                    if CANCEL.is_set():           # the user pressed 'q'
+                        interrupted = True
+                        web_pool.shutdown(cancel_futures=True)
+                        api_pool.shutdown(cancel_futures=True)
+                        break
+            except KeyboardInterrupt:
+                interrupted = True
+                CANCEL.set()
+                print("\nCtrl+C received: stopping downloads and cleaning up "
+                      "partial files...")
+                web_pool.shutdown(cancel_futures=True)
+                api_pool.shutdown(cancel_futures=True)
 
     counts["elapsed"] = time.monotonic() - started
     lines = summary_lines(counts)

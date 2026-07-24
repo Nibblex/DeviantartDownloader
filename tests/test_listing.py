@@ -5,11 +5,35 @@ import pytest
 from deviantart_downloader import manifest as manifest_mod
 from deviantart_downloader import listing
 from deviantart_downloader import web as web_mod
-from deviantart_downloader.constants import WEB_SUBDIR
+from deviantart_downloader.constants import CANCEL, WEB_SUBDIR
 from deviantart_downloader.naming import deviation_key
 
 from .conftest import (DEV_ID, WEB_ID, FakeClient, FakeWebClient,
                        blocked_web_item, make_dev, web_item)
+
+
+class TestListingStopsOnQuit:
+    def test_fetch_gallery_stops_when_cancelled(self):
+        CANCEL.set()
+        client = FakeClient(pages=[{"results": [make_dev()], "has_more": True}])
+        assert listing.fetch_gallery(client, "artist") == []
+        assert client.calls == []                 # never hit the network
+
+    def test_fetch_gallery_web_stops_when_cancelled(self):
+        CANCEL.set()
+        web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": True}])
+        assert listing.fetch_gallery_web(web, "artist") == []
+        assert web.calls == []
+
+    def test_resolve_via_api_stops_when_cancelled(self, manifest):
+        CANCEL.set()
+        client = FakeClient(pages=[{"results": [make_dev()], "has_more": False}])
+        blocked = [make_dev(deviationid="ffffeeee-0000",
+                            url="https://www.deviantart.com/a/art/x-222")]
+        result = listing.resolve_via_api(client, "artist", blocked,
+                                         manifest=manifest, redownload_missing=True)
+        assert result == []
+        assert client.calls == []
 
 
 def test_fetch_gallery_walks_every_page(capsys):

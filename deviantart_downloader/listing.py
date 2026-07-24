@@ -1,7 +1,7 @@
 """Walking a gallery listing, over either route, and pairing the two up."""
 
 from .api import DeviantArtClient
-from .constants import PAGE_LIMIT, WEB_PAGE_LIMIT
+from .constants import CANCEL, PAGE_LIMIT, WEB_PAGE_LIMIT, wait_if_paused
 from .manifest import DownloadManifest
 from .naming import deviation_key
 from .web import WebClient, WebError, normalize_web_deviation
@@ -87,6 +87,9 @@ def fetch_gallery(
     deviations = []
     offset = 0
     while True:
+        wait_if_paused()
+        if CANCEL.is_set():                   # 'q' during the listing
+            break
         data = client.api_get(
             endpoint,
             params={
@@ -130,6 +133,9 @@ def fetch_gallery_web(
     deviations = []
     offset = 0
     while True:
+        wait_if_paused()
+        if CANCEL.is_set():                   # 'q' during the listing
+            break
         data = web.gallery_page(username, offset, WEB_PAGE_LIMIT, folderid=folderid)
         results = [normalize_web_deviation(item) for item in data.get("results", [])]
         deviations.extend(results)
@@ -235,6 +241,9 @@ def resolve_via_api(
     wanted = sorted({(position[k] // PAGE_LIMIT) * PAGE_LIMIT
                      for d in pending if (k := deviation_key(d)) in position})
     for off in wanted:
+        wait_if_paused()
+        if CANCEL.is_set():                   # 'q' during the lookup
+            return []
         absorb(off)
 
     # Pass 2: fill the gaps left by any drift between the two orderings, walking
@@ -243,6 +252,9 @@ def resolve_via_api(
     # earliest such offset exists, so the walk never reaches for it.
     offset = 0
     while missing():
+        wait_if_paused()
+        if CANCEL.is_set():                   # 'q' during the lookup
+            return []
         if terminal and offset > min(terminal):
             break
         if offset in fetched:
