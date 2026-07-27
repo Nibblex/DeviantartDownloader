@@ -120,10 +120,11 @@ def make_client(tmp_path, session, fresh_token=True):
 class FakeClient:
     """Scripted API client: one dict per gallery page, in order."""
 
-    def __init__(self, pages=None):
+    def __init__(self, pages=None, user_mode=False):
         self.pages = list(pages or [])
         self.calls = []
         self.session = FakeSession()
+        self.user_mode = user_mode      # a saved --login session, as the real client
 
     def api_get(self, endpoint, params=None):
         self.calls.append((endpoint, params))
@@ -233,7 +234,7 @@ def clean_cli_env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "load_dotenv", lambda path=None: None)
     for var in ("DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_WORKERS", "DA_UNBLUR",
-                "DA_OUTPUT", "DA_API_ONLY"):
+                "DA_OUTPUT", "DA_FORCE_API"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 
@@ -242,8 +243,8 @@ def set_argv(monkeypatch, *args):
     """Build an argv. Tests opt into the website route explicitly with the
     marker "--web", so by default nothing reaches for the website."""
     argv = ["deviantart-downloader", *args]
-    if "--api-only" not in argv and "--web" not in argv:
-        argv.append("--api-only")
+    if "--force-api" not in argv and "--web" not in argv:
+        argv.append("--force-api")
     monkeypatch.setattr(sys, "argv", [a for a in argv if a != "--web"])
 
 

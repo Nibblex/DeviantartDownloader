@@ -33,8 +33,11 @@ Usage:
   # (requires whitelisting http://127.0.0.1:8721/callback in your app):
   deviantart-downloader --login
 
+  # download the gallery of every user the logged-in account watches:
+  deviantart-downloader --watching
+
   # route everything through the API, as older versions did:
-  deviantart-downloader username --api-only
+  deviantart-downloader username --force-api
 
 The modules are layered bottom-up: constants and config depend on nothing,
 naming, manifest, literature and controls on those, api and web wrap one route

@@ -12,7 +12,7 @@ from datetime import date
 from .api import DeviantArtClient
 from .constants import WEB_BASE
 from .listing import fetch_api_folders
-from .web import WebClient, WebError
+from .web import WebClient, WebError, web_media_url
 
 # 365.25-day years, matching how DeviantArt counts "Deviant for X years".
 _SECONDS_PER_YEAR = 31_557_600
@@ -52,19 +52,31 @@ def _fill_missing(info: dict, extra: dict):
 # Source-specific extraction
 # ---------------------------------------------------------------------------
 
-def _module(about: dict, name: str) -> dict:
-    """The moduleData payload of a named module in an 'about' response."""
+def _module(about: dict, name: str, key: str | None = None) -> dict:
+    """The moduleData payload of a named module in an 'about' response.
+
+    Most modules key their payload by their own name; the ones that do not (the
+    cover answers under "coverDeviation") name that key with `key`.
+    """
     page = (about.get("gruser") or {}).get("page") or {}
     for module in page.get("modules") or []:
         if module.get("name") == name:
-            return (module.get("moduleData") or {}).get(name) or {}
+            return (module.get("moduleData") or {}).get(key or name) or {}
     return {}
 
 
 def _from_web_about(about: dict) -> dict:
     a = _module(about, "about")
     stats = _module(about, "userstats")
+    owner = about.get("owner") or {}
+    # The banner is a deviation like any other, so its listing entry carries the
+    # media block the full-resolution URL is built from.
+    cover = _module(about, "cover_deviation", "coverDeviation")
     out = {
+        # The website serves the large avatar and the banner at full resolution,
+        # both of which the API only offers in smaller sizes.
+        "avatar": owner.get("usericon"),
+        "banner": web_media_url((cover.get("coverDeviation") or {}).get("media") or {}),
         "country": a.get("country"),
         "website": a.get("website"),
         "website_label": a.get("websiteLabel"),
@@ -92,7 +104,13 @@ def _from_web_about(about: dict) -> dict:
 
 def _from_api_profile(api: dict) -> dict:
     st = api.get("stats") or {}
+    # The banner is a deviation of its own; `cover_photo` is the older field and
+    # comes back empty for most profiles, so it only serves as a last resort.
+    cover = (api.get("cover_deviation") or {}).get("cover_deviation") or {}
+    banner = (cover.get("content") or cover.get("preview") or {}).get("src")
     return {
+        "avatar": (api.get("user") or {}).get("usericon"),
+        "banner": banner or api.get("cover_photo") or None,
         "real_name": (api.get("real_name") or "").strip(),
         "bio": _plain_text(api.get("bio")),
         "tagline": (api.get("tagline") or "").strip(),
@@ -149,10 +167,15 @@ def _num(value) -> str:
 
 
 def format_profile(info: dict) -> str:
-    lines = [f"Profile: {info['username']}"
-             + (f" ({info['real_name']})" if info.get("real_name") else "")]
-    lines.append(f"  {info['profile_url']}")
+    head = f"Profile: {info['username']}"
+    if info.get("real_name"):
+        head += f" ({info['real_name']})"
+    lines = [f"{head} — {info['profile_url']}"]
 
+    if info.get("avatar"):
+        lines.append(f"  Avatar: {info['avatar']}")
+    if info.get("banner"):
+        lines.append(f"  Banner: {info['banner']}")
     if info.get("tagline"):
         lines.append(f"  Tagline: {info['tagline']}")
     if info.get("is_artist"):

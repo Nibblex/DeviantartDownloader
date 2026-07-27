@@ -18,6 +18,9 @@ from .web import WebClient, needs_api
 
 STATUSES = ("downloaded", "skipped", "failed", "no_media", "cancelled")
 
+# The friends endpoint caps its page size lower than the gallery listing does.
+WATCH_PAGE_LIMIT = 50
+
 
 def _quit_before_download() -> None:
     """Exit after 'q' was pressed during listing/routing, before any download."""
@@ -131,6 +134,37 @@ def discover_users(output_root: Path) -> list[str]:
             "Pass a profile (URL or username) to download a gallery first."
         )
     return users
+
+
+def fetch_watching(client: DeviantArtClient) -> list[str]:
+    """List the users the logged-in account watches.
+
+    The friends endpoint reads the watchlist of the account behind the token
+    when no username is given, which is why this needs the session --login
+    saves: an application token belongs to no deviant and watches nobody.
+    """
+    if not client.user_mode:
+        sys.exit(
+            "--watching needs your DeviantArt account: run --login first.\n"
+            "Without a saved session the token belongs to the application, "
+            "which watches nobody."
+        )
+    usernames, offset = [], 0
+    while True:
+        data = client.api_get("user/friends", params={
+            "offset": offset, "limit": WATCH_PAGE_LIMIT, "mature_content": "true",
+        })
+        results = data.get("results", [])
+        usernames += [name for r in results
+                      if (name := (r.get("user") or {}).get("username"))]
+        print(f"  Page at offset {offset}: {len(results)} watched user(s) "
+              f"(total: {len(usernames)})")
+        if not data.get("has_more"):
+            break
+        offset = data.get("next_offset") or offset + WATCH_PAGE_LIMIT
+    if not usernames:
+        sys.exit("Your account is not watching anybody, so there is nothing to sync.")
+    return usernames
 
 
 def sync_gallery(

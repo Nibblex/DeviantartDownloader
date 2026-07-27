@@ -23,15 +23,28 @@ def web_about(**about_overrides):
     userstats = {"deviations": 2017, "watchers": 676104, "watching": 258,
                  "pageviews": 54305859, "favourites": 3172,
                  "commentsReceivedProfile": 31211, "commentsMade": 12464}
-    return {"gruser": {"page": {"modules": [
-        {"name": "about", "moduleData": {"about": about}},
-        {"name": "userstats", "moduleData": {"userstats": userstats}},
-    ]}}}
+    # The cover module keys its payload by "coverDeviation", not by its own name.
+    cover = {"coverDeviation": {"media": {
+        "baseUri": "https://images.example/banner.jpg",
+        "prettyName": "banner_by_artist",
+        "token": ["tok"],
+        "types": [{"t": "fullview", "r": 0}],
+    }}}
+    return {"owner": {"usericon": "https://a.deviantart.net/avatars-big/a/r/artist.jpg"},
+            "gruser": {"page": {"modules": [
+                {"name": "about", "moduleData": {"about": about}},
+                {"name": "userstats", "moduleData": {"userstats": userstats}},
+                {"name": "cover_deviation", "moduleData": {"coverDeviation": cover}},
+            ]}}}
 
 
 def api_profile(**overrides):
     data = {
-        "user": {"username": "artist"},
+        "user": {"username": "artist",
+                 "usericon": "https://a.deviantart.net/avatars/a/r/artist.jpg"},
+        "cover_photo": "",
+        "cover_deviation": {"cover_deviation": {
+            "content": {"src": "https://images.example/api-banner.jpg?token=t"}}},
         "profile_url": "https://www.deviantart.com/artist",
         "user_is_artist": True, "artist_specialty": "Digital Art",
         "real_name": "Jane Doe", "tagline": "", "country": "Canada",
@@ -53,6 +66,15 @@ class TestExtraction:
         assert out["badges"] == ["Diamond", "Emerald"]
         assert out["stats"]["watchers"] == 676104
         assert out["stats"]["comments_received"] == 31211
+        assert out["avatar"].endswith("avatars-big/a/r/artist.jpg")
+        assert out["banner"] == "https://images.example/banner.jpg?token=tok"
+
+    def test_from_web_about_survives_a_profile_with_no_banner(self):
+        about = web_about()
+        modules = about["gruser"]["page"]["modules"]
+        # What the website sends for a profile that never set a cover.
+        modules[-1]["moduleData"] = {"coverDeviation": {"coverDeviation": None}}
+        assert profile._from_web_about(about)["banner"] is None
 
     def test_from_api_profile_pulls_bio_and_real_name(self):
         out = profile._from_api_profile(api_profile())
@@ -60,6 +82,17 @@ class TestExtraction:
         assert out["bio"] == "Hi there\nsecond line"   # tags stripped, <br> kept
         assert out["specialty"] == "Digital Art"
         assert out["stats"]["deviations"] == 2017
+        assert out["avatar"].endswith("avatars/a/r/artist.jpg")
+        assert out["banner"] == "https://images.example/api-banner.jpg?token=t"
+
+    def test_from_api_profile_falls_back_to_the_preview_cover(self):
+        out = profile._from_api_profile(api_profile(cover_deviation={
+            "cover_deviation": {"preview": {"src": "https://images.example/p.jpg"}}}))
+        assert out["banner"] == "https://images.example/p.jpg"
+
+    def test_from_api_profile_without_a_cover(self):
+        assert profile._from_api_profile(
+            api_profile(cover_deviation=None))["banner"] is None
 
     @pytest.mark.parametrize("about,expected", [
         ({"dobYear": 1991, "dobMonth": 6, "dobDay": 18}, "18 June 1991"),
@@ -88,6 +121,9 @@ class TestGatherProfile:
         assert info["bio"] == "Hi there\nsecond line"
         assert info["real_name"] == "Jane Doe"
         assert info["galleries"] == [{"name": "Featured", "size": 1373}]
+        # The website's avatar and banner win: both come at a higher resolution.
+        assert info["avatar"].endswith("avatars-big/a/r/artist.jpg")
+        assert info["banner"] == "https://images.example/banner.jpg?token=tok"
         assert len(client.calls) == 1   # only user/profile, folders came from web
 
     def test_falls_back_to_the_api_when_the_website_breaks(self, capsys):
@@ -101,6 +137,8 @@ class TestGatherProfile:
         ])
         info = profile.gather_profile(client, BrokenWeb(), "artist")
         assert info["stats"]["deviations"] == 2017      # from the API
+        assert info["avatar"].endswith("avatars/a/r/artist.jpg")
+        assert info["banner"] == "https://images.example/api-banner.jpg?token=t"
         assert info["galleries"] == [{"name": "Featured", "size": 40}]
         assert "falling back to the API" in capsys.readouterr().out
 
@@ -112,7 +150,9 @@ class TestFormatProfile:
                                      {"name": "Sketches", "size": None}])
         client = FakeClient(pages=[api_profile()])
         text = profile.format_profile(profile.gather_profile(client, web, "artist"))
-        assert "Profile: artist (Jane Doe)" in text
+        assert "Profile: artist (Jane Doe) — https://www.deviantart.com/artist" in text
+        assert "Avatar: https://a.deviantart.net/avatars-big/a/r/artist.jpg" in text
+        assert "Banner: https://images.example/banner.jpg?token=tok" in text
         assert "Birthday: 18 June 1991 (age 35)" in text
         assert "Deviant for: 20 years" in text
         assert "Watchers: 676,104" in text
@@ -124,6 +164,7 @@ class TestFormatProfile:
     def test_omits_absent_sections(self):
         text = profile.format_profile(
             {"username": "ghost", "profile_url": "u", "galleries": []})
-        assert text.startswith("Profile: ghost")
+        assert text.startswith("Profile: ghost — u")
+        assert "Avatar" not in text and "Banner" not in text
         assert "Birthday" not in text and "Statistics" not in text
         assert "Galleries: 0 folder(s)" in text

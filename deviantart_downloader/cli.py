@@ -12,9 +12,23 @@ from .constants import CancelledByUser
 from .listing import GalleryNotFoundError
 from .naming import extract_username
 from .profile import print_profile
-from .sync import (add_stats, discover_users, human_size, new_stats,
-                   summary_lines, sync_gallery)
+from .sync import (add_stats, discover_users, fetch_watching, human_size,
+                   new_stats, summary_lines, sync_gallery)
 from .web import WebClient
+
+
+def confirm(question: str) -> bool:
+    """Ask a yes/no question at the terminal; assume yes when nobody can answer.
+
+    A piped or redirected stdin means the run was scripted, so it goes ahead
+    instead of blocking forever on a prompt no one will ever see.
+    """
+    try:
+        if not sys.stdin.isatty():
+            return True
+        return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, ValueError):        # stdin closed mid-prompt
+        return False
 
 
 def run():
@@ -30,10 +44,15 @@ def run():
              "username. If omitted, every user already downloaded to the "
              "output folder is synced with their latest works",
     )
+    parser.add_argument("--watching", action="store_true",
+                        help="Download the gallery of every user your account "
+                             "watches, instead of a single profile. Needs the "
+                             "session --login saves")
     parser.add_argument("-i", "--info", action="store_true",
-                        help="Show the profile's info (bio, location, birthday, "
-                             "links, statistics, galleries and their item counts) "
-                             "and exit without downloading anything. Requires a profile")
+                        help="Show the profile's info (URLs of the profile, avatar "
+                             "and banner, bio, location, birthday, links, statistics, "
+                             "galleries and their item counts) and exit without "
+                             "downloading anything. Requires a profile")
     parser.add_argument("-g", "--gallery", metavar="NAME",
                         help="Download only the gallery folder with this name "
                              "(case-insensitive) instead of the whole gallery. "
@@ -61,8 +80,8 @@ def run():
                         help="Simultaneous API downloads (default: DA_API_WORKERS from "
                              ".env or 2). Kept low on purpose: the API is rate-limited, "
                              "so fewer parallel requests avoid 429s")
-    parser.add_argument("--api-only", action="store_true",
-                        default=env_bool("DA_API_ONLY", False),
+    parser.add_argument("--force-api", action="store_true",
+                        default=env_bool("DA_FORCE_API", False),
                         help="Route every work through the API instead of reading "
                              "the public listing off the website (slower on the "
                              "API quota; use it if the website route breaks)")
@@ -98,6 +117,9 @@ def run():
     if args.api_workers < 1:
         sys.exit(f"The number of API workers must be at least 1 (got: {args.api_workers}).")
 
+    if args.watching and args.profile_url:
+        sys.exit("--watching already picks the profiles to download (every user "
+                 "you watch); drop the profile argument or drop --watching.")
     if args.gallery and not args.profile_url:
         sys.exit("--gallery needs a profile: pass the username or URL of the "
                  "gallery's owner.")
@@ -116,12 +138,23 @@ def run():
 
     if args.login:
         login(client)
-        if not args.profile_url:
+        if not (args.profile_url or args.watching):
             return  # login-only invocation
 
     output_root = Path(args.output).expanduser()
     if args.profile_url:
         usernames = [extract_username(args.profile_url)]
+    elif args.watching:
+        print("Fetching the users your account watches...")
+        usernames = fetch_watching(client)
+        # Syncing a whole watchlist is a long job, so it is worth seeing the
+        # size of it before it starts. Interrupting later loses no progress.
+        print(f"\nYou watch {len(usernames)} user(s).")
+        if not confirm(f"Download all {len(usernames)} galleries "
+                       f"into {output_root}?"):
+            print("Cancelled; nothing was downloaded.")
+            return
+        print()
     else:
         # No profile: sync every user already downloaded to the output folder
         usernames = discover_users(output_root)
@@ -134,7 +167,7 @@ def run():
         print("Using the saved user session (mature works come unblurred if "
               "your account allows them).")
 
-    web = None if args.api_only else WebClient()
+    web = None if args.force_api else WebClient()
     if web is None:
         print("API-only mode: every work goes through the API.")
 

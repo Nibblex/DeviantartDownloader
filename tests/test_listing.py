@@ -155,7 +155,7 @@ class TestListGallery:
         assert len(devs) == 1
         assert "falling back to the API" in capsys.readouterr().out
 
-    def test_api_only_never_touches_the_website(self):
+    def test_force_api_never_touches_the_website(self):
         client = FakeClient(pages=[{"results": [make_dev()], "has_more": False}])
         devs, from_web = listing.list_gallery(client, None, "artist",
                                          manifest=None, full=False)

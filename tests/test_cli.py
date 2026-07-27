@@ -1,5 +1,6 @@
 """End-to-end runs through the command line."""
 
+import io
 import json
 
 import pytest
@@ -7,9 +8,9 @@ import pytest
 from deviantart_downloader import api, cli, downloads, listing, sync
 from deviantart_downloader.constants import CANCEL, CancelledByUser
 
-from .conftest import (BASE_URI, DEV_ID, FakeWebClient, blocked_web_item,
-                       fake_download, make_dev, make_user_dir, set_argv,
-                       web_item)
+from .conftest import (BASE_URI, DEV_ID, FakeClient, FakeWebClient,
+                       blocked_web_item, fake_download, make_dev, make_user_dir,
+                       set_argv, web_item)
 
 
 class TestRun:
@@ -431,18 +432,19 @@ class TestDiscoverUsers:
             sync.discover_users(tmp_path)
 
 
+@pytest.fixture
+def galleries(monkeypatch):
+    """Patch fetch_gallery/download_file; galleries dict drives the data."""
+    galleries = {}
+    monkeypatch.setattr(
+        listing, "fetch_gallery",
+        lambda client, username, **kw: galleries.get(username, []))
+
+    monkeypatch.setattr(downloads, "download_file", fake_download)
+    return galleries
+
+
 class TestSyncAll:
-    @pytest.fixture
-    def galleries(self, monkeypatch):
-        """Patch fetch_gallery/download_file; galleries dict drives the data."""
-        galleries = {}
-        monkeypatch.setattr(
-            listing, "fetch_gallery",
-            lambda client, username, **kw: galleries.get(username, []))
-
-        monkeypatch.setattr(downloads, "download_file", fake_download)
-        return galleries
-
     def test_syncs_every_downloaded_user(self, clean_cli_env, monkeypatch,
                                          galleries, capsys):
         out = clean_cli_env / "out"
@@ -531,6 +533,162 @@ class TestSyncAll:
         stdout = capsys.readouterr().out
         assert "Downloaded: 1" in stdout
         assert "Skipped (already existed): 1" in stdout
+
+
+class TestConfirm:
+    @pytest.fixture
+    def at_a_terminal(self, monkeypatch):
+        """Pretend stdin is a real terminal, so the prompt is actually asked."""
+        monkeypatch.setattr(cli.sys, "stdin", io.StringIO())
+        monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+
+    @pytest.mark.parametrize("answer,expected", [
+        ("y", True), ("Y", True), ("yes", True), (" YES ", True),
+        ("n", False), ("", False), ("nope", False), ("maybe", False),
+    ])
+    def test_only_an_explicit_yes_confirms(self, at_a_terminal, monkeypatch,
+                                           answer, expected):
+        monkeypatch.setattr("builtins.input", lambda prompt="": answer)
+        assert cli.confirm("Go?") is expected
+
+    def test_a_scripted_run_is_never_asked(self, monkeypatch):
+        def unreachable(prompt=""):
+            raise AssertionError("a non-interactive run must not prompt")
+
+        monkeypatch.setattr("builtins.input", unreachable)
+        # pytest already replaces stdin with a non-tty stream.
+        assert cli.confirm("Go?") is True
+
+    def test_stdin_closing_mid_prompt_declines(self, at_a_terminal, monkeypatch):
+        def closed(prompt=""):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", closed)
+        assert cli.confirm("Go?") is False
+
+
+class TestFetchWatching:
+    def watch_page(self, *names, has_more=False, next_offset=None):
+        return {"results": [{"user": {"username": n}} for n in names],
+                "has_more": has_more, "next_offset": next_offset}
+
+    def test_walks_every_page_of_the_watchlist(self):
+        client = FakeClient(user_mode=True, pages=[
+            self.watch_page("alice", "bob", has_more=True, next_offset=50),
+            self.watch_page("carol"),
+        ])
+        assert sync.fetch_watching(client) == ["alice", "bob", "carol"]
+        endpoints = [endpoint for endpoint, _ in client.calls]
+        assert endpoints == ["user/friends"] * 2
+        # No username: the endpoint then answers for the account behind the token.
+        assert "username" not in client.calls[0][1]
+        assert [params["offset"] for _, params in client.calls] == [0, 50]
+
+    def test_falls_back_to_a_computed_offset(self):
+        client = FakeClient(user_mode=True, pages=[
+            self.watch_page("alice", has_more=True),   # no next_offset
+            self.watch_page("bob"),
+        ])
+        assert sync.fetch_watching(client) == ["alice", "bob"]
+        assert client.calls[1][1]["offset"] == sync.WATCH_PAGE_LIMIT
+
+    def test_entries_without_a_username_are_dropped(self):
+        client = FakeClient(user_mode=True,
+                            pages=[{"results": [{"user": {"username": "alice"}},
+                                                {"user": None}, {}]}])
+        assert sync.fetch_watching(client) == ["alice"]
+
+    def test_without_a_saved_session_exits(self):
+        client = FakeClient(user_mode=False)
+        with pytest.raises(SystemExit, match="run --login first"):
+            sync.fetch_watching(client)
+        assert client.calls == []       # no quota spent on a doomed request
+
+    def test_watching_nobody_exits(self):
+        client = FakeClient(user_mode=True, pages=[self.watch_page()])
+        with pytest.raises(SystemExit, match="not watching anybody"):
+            sync.fetch_watching(client)
+
+
+class TestWatchingRun:
+    def test_syncs_every_watched_user(self, clean_cli_env, monkeypatch,
+                                      galleries, capsys):
+        out = clean_cli_env / "out"
+        galleries["alice"] = [make_dev()]
+        galleries["bob"] = [make_dev(deviationid="ffffeeee-0000", title="Bob Art")]
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice", "bob"])
+
+        set_argv(monkeypatch, "--watching", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        cli.run()
+
+        assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
+        assert (out / "bob" / "api" / "Bob Art_ffffeeee.png").is_file()
+        stdout = capsys.readouterr().out
+        assert "You watch 2 user(s)" in stdout
+        assert "All users synced. Downloaded: 2" in stdout
+
+    def test_a_gone_profile_is_skipped_not_fatal(self, clean_cli_env, monkeypatch,
+                                                 galleries, capsys):
+        out = clean_cli_env / "out"
+        galleries["alice"] = [make_dev()]     # "ghost" has no gallery at all
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["ghost", "alice"])
+
+        set_argv(monkeypatch, "--watching", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        cli.run()
+
+        assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
+        assert "Skipping ghost" in capsys.readouterr().out
+
+    def test_declining_the_prompt_downloads_nothing(self, clean_cli_env,
+                                                    monkeypatch, galleries, capsys):
+        out = clean_cli_env / "out"
+        galleries["alice"] = [make_dev()]
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice"])
+        monkeypatch.setattr(cli, "confirm", lambda question: False)
+
+        set_argv(monkeypatch, "--watching", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        cli.run()      # a decline is not an error: it returns normally
+
+        assert not out.exists()
+        stdout = capsys.readouterr().out
+        assert "You watch 1 user(s)." in stdout
+        assert "Cancelled; nothing was downloaded." in stdout
+
+    def test_the_prompt_names_the_count_and_the_output_folder(
+            self, clean_cli_env, monkeypatch, galleries):
+        out = clean_cli_env / "out"
+        asked = []
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice", "bob"])
+        monkeypatch.setattr(cli, "confirm",
+                            lambda question: asked.append(question) or False)
+
+        set_argv(monkeypatch, "--watching", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--delay", "0")
+        cli.run()
+
+        assert asked == [f"Download all 2 galleries into {out}?"]
+
+    def test_with_a_profile_exits(self, clean_cli_env, monkeypatch):
+        set_argv(monkeypatch, "--watching", "someartist", "--client-id", "x",
+                 "--client-secret", "y")
+        with pytest.raises(SystemExit, match="drop the profile argument"):
+            cli.run()
+
+    def test_login_then_watching_does_not_stop_at_the_login(
+            self, clean_cli_env, monkeypatch, galleries, capsys):
+        out = clean_cli_env / "out"
+        galleries["alice"] = [make_dev()]
+        monkeypatch.setattr(cli, "login", lambda client: None)
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice"])
+
+        set_argv(monkeypatch, "--watching", "--login", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--delay", "0")
+        cli.run()
+
+        assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
 
 
 class TestMain:

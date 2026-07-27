@@ -16,14 +16,14 @@ Works are fetched through two routes, so the API quota is spent only on what the
 | `web/` | Every ordinary work, resolved straight from the website's public listing | none |
 | `api/` | Mature content, which the website only serves blurred to logged-out visitors | only the listing pages that hold mature works + the download endpoint |
 
-Each route saves to its own subfolder inside the gallery folder. `--api-only` restores the old behaviour of routing everything through the [official API](https://www.deviantart.com/developers/).
+Each route saves to its own subfolder inside the gallery folder. `--force-api` restores the old behaviour of routing everything through the [official API](https://www.deviantart.com/developers/).
 
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
 - Downloads literature and journals too: text works have no media file, so their full body is saved next to the images as plain text (`.txt`) or a standalone HTML document (`.html`), your choice with `--literature-format`. The body is fetched from the website for no API quota, falling back to the listing excerpt when it is unavailable. Restrict a run to one kind of work with `--only images` or `--only literature`.
 - Downloads mature content unblurred when you log in with your account (`--login`, see below). Without login, `--unblur`/`DA_UNBLUR=true` strips the blur where possible: works uploaded since ~mid-2021 have their URL token pinned to the blurred version, so for those the blurred preview is downloaded instead.
 - Parallel downloads with retries and API rate-limit handling. The website route needs no OAuth call at all, so a re-sync of an all-ages gallery costs zero API requests.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
-- Run it with no arguments to re-sync every user already present in the output folder with their latest works.
+- Run it with no arguments to re-sync every user already present in the output folder with their latest works, or with `--watching` to download every user your account watches.
 - Re-syncs are incremental: the gallery listing stops as soon as it reaches a page of already-downloaded works (`--full` forces a complete walk).
 - Files you delete manually stay deleted: the download record (`_downloaded.json`) is authoritative, so deleted works are not downloaded again unless you pass `--redownload-missing`.
 - Saves the full metadata of every work to `_metadata.json`.
@@ -66,7 +66,7 @@ DA_ONLY=
 # Optional: output folder, absolute or relative ("~" is expanded)
 DA_OUTPUT=~/Pictures/deviantart
 # Optional: route every work through the API instead of the website listing
-DA_API_ONLY=false
+DA_FORCE_API=false
 ```
 
 ## Usage
@@ -91,7 +91,8 @@ deviantart-downloader username --literature-format html  # save literature/journ
 deviantart-downloader username --only images       # download only images (skip literature/journals)
 deviantart-downloader username --only literature    # download only literature/journals
 deviantart-downloader username --full         # walk the entire gallery listing
-deviantart-downloader username --api-only     # route everything through the API
+deviantart-downloader username --force-api    # route everything through the API
+deviantart-downloader --watching              # download every user you watch (needs --login)
 ```
 
 ### Try it on a demo profile
@@ -113,7 +114,7 @@ Done. Downloaded: 18 | Skipped (already existed): 0 | No file: 0 | Failed: 0
 Files saved to: /.../demo/test
 ```
 
-Pass `-i/--info` to print a profile summary — bio, location, birthday, "deviant for X years", links, statistics and every gallery folder with its item count — and exit without downloading anything. DeviantArt does not expose pronouns through its endpoints, so those are not shown.
+Pass `-i/--info` to print a profile summary — profile URL, avatar and banner URLs, bio, location, birthday, "deviant for X years", links, statistics and every gallery folder with its item count — and exit without downloading anything. DeviantArt does not expose pronouns through its endpoints, so those are not shown.
 
 Pass `-g/--gallery "NAME"` to download only one gallery folder instead of the whole gallery (the name is matched case-insensitively; if it doesn't exist the tool lists the folders that do). Files land in the same `<output>/<username>/` folder as a full sync, so works are never downloaded twice across runs.
 
@@ -135,6 +136,32 @@ deviantart-downloader -o my_folder   # sync everyone under my_folder
 ```
 
 Only subdirectories created by a previous run are considered (they are recognised by the `_downloaded.json` / `_metadata.json` files inside), so unrelated folders in the output directory are ignored. Users whose gallery comes back empty (deactivated accounts) are skipped with a notice instead of aborting the run.
+
+### Sync everyone you watch (`--watching`)
+
+`--watching` reads the watchlist of the account you logged in with and downloads all of those galleries into the output folder, one subfolder per user:
+
+```bash
+deviantart-downloader --login        # once, to save the session
+deviantart-downloader --watching     # then, whenever you want to catch up
+```
+
+Since a watchlist can be long, it tells you how many users it found and asks before starting:
+
+```
+Fetching the users your account watches...
+  Page at offset 0: 50 watched user(s) (total: 50)
+  Page at offset 50: 48 watched user(s) (total: 98)
+
+You watch 98 user(s).
+Download all 98 galleries into downloads? [y/N]
+```
+
+Anything but `y`/`yes` cancels without downloading anything. When stdin is piped or redirected the question is skipped and the run goes ahead, so `--watching` still works unattended from a cron job or a script.
+
+It needs that saved session: without it the token belongs to the application, which watches nobody. Every other option applies per user as usual, so `--watching --only images` or `--watching --full` do what you would expect. The list is fetched fresh on each run, so people you started or stopped watching are picked up automatically.
+
+Re-runs are incremental like any other sync, and a watched user whose account has since been deactivated is skipped with a notice. This is not a setting you want in `.env`: it is an action, and every run downloads every gallery you watch.
 
 ## Unblurred mature content (`--login`)
 
