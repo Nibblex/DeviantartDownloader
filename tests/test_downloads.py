@@ -83,7 +83,7 @@ class TestProcessDeviation:
 
         monkeypatch.setattr(downloads, "download_file", fake_download)
         status, msg = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0, manifest)
+            FakeClient(), make_dev(), tmp_path, manifest)
         assert status == "downloaded"
         assert fetched == [("https://example.com/pic.png", None)]
         assert manifest.filename_for(DEV_ID) == "My Art_abcd1234.png"
@@ -100,7 +100,7 @@ class TestProcessDeviation:
 
         monkeypatch.setattr(downloads, "download_file", fake_download)
         status, _ = downloads.process_deviation(
-            client, make_dev(is_downloadable=True), tmp_path, 0, manifest)
+            client, make_dev(is_downloadable=True), tmp_path, manifest)
         assert status == "downloaded"
         assert fetched == ["https://example.com/original.png"]
         assert client.calls[0][0] == f"deviation/download/{DEV_ID}"
@@ -120,7 +120,7 @@ class TestProcessDeviation:
 
         monkeypatch.setattr(downloads, "download_file", fake_download)
         status, _ = downloads.process_deviation(
-            FailingClient(), make_dev(is_downloadable=True), tmp_path, 0, manifest)
+            FailingClient(), make_dev(is_downloadable=True), tmp_path, manifest)
         assert status == "downloaded"
         assert fetched == ["https://example.com/pic.png"]
 
@@ -136,49 +136,25 @@ class TestProcessDeviation:
 
         monkeypatch.setattr(downloads, "download_file", fake_download)
         status, _ = downloads.process_deviation(
-            FakeClient(), make_dev(content={"src": blurred}), tmp_path, 0,
+            FakeClient(), make_dev(content={"src": blurred}), tmp_path,
             manifest, unblur=True)
         assert status == "downloaded"
         url, fallback = fetched[0]
         assert ",blur_16" not in url
         assert fallback == blurred
 
-    def _spy_delay(self, monkeypatch):
-        """Record the delays passed to CANCEL.wait after a download."""
-        waited = []
-        monkeypatch.setattr(downloads, "download_file",
-                            lambda session, url, dest, fallback=None:
-                            (dest.write_bytes(b"x"), True)[1])
-        monkeypatch.setattr(downloads.CANCEL, "wait",
-                            lambda delay: waited.append(delay) or False)
-        return waited
-
-    def test_delay_throttles_the_api_route(self, tmp_path, manifest, monkeypatch):
-        waited = self._spy_delay(monkeypatch)
-        status, _ = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0.5, manifest, use_api=True)
-        assert status == "downloaded"
-        assert waited == [0.5]
-
-    def test_delay_skips_the_website_route(self, tmp_path, manifest, monkeypatch):
-        waited = self._spy_delay(monkeypatch)
-        status, _ = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0.5, manifest, use_api=False)
-        assert status == "downloaded"
-        assert waited == []
-
     def test_skips_already_downloaded(self, tmp_path, manifest):
         manifest.add(DEV_ID, "old name.png")
         (tmp_path / "old name.png").write_bytes(b"x")
         status, msg = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0, manifest)
+            FakeClient(), make_dev(), tmp_path, manifest)
         assert status == "skipped"
         assert "old name.png" in msg
 
     def test_skips_locally_deleted_by_default(self, tmp_path, manifest):
         manifest.add(DEV_ID, "deleted.png")
         status, msg = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0, manifest)
+            FakeClient(), make_dev(), tmp_path, manifest)
         assert status == "skipped"
         assert "Deleted locally" in msg
 
@@ -192,20 +168,20 @@ class TestProcessDeviation:
 
         monkeypatch.setattr(downloads, "download_file", fake_download)
         status, _ = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0, manifest,
+            FakeClient(), make_dev(), tmp_path, manifest,
             redownload_missing=True)
         assert status == "downloaded"
 
     def test_existing_file_with_same_name_is_recorded(self, tmp_path, manifest):
         (tmp_path / "My Art_abcd1234.png").write_bytes(b"x")
         status, _ = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0, manifest)
+            FakeClient(), make_dev(), tmp_path, manifest)
         assert status == "skipped"
         assert manifest.has(DEV_ID)
 
     def test_no_media_deviation(self, tmp_path, manifest):
         status, msg = downloads.process_deviation(
-            FakeClient(), make_dev(content=None), tmp_path, 0, manifest)
+            FakeClient(), make_dev(content=None), tmp_path, manifest)
         assert status == "no_media"
         assert "NO FILE" in msg
 
@@ -213,14 +189,14 @@ class TestProcessDeviation:
         monkeypatch.setattr(downloads, "download_file",
                             lambda session, url, dest, fallback=None: False)
         status, _ = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0, manifest)
+            FakeClient(), make_dev(), tmp_path, manifest)
         assert status == "failed"
         assert not manifest.has(DEV_ID)
 
     def test_cancelled_before_start(self, tmp_path, manifest):
         CANCEL.set()
         status, _ = downloads.process_deviation(
-            FakeClient(), make_dev(), tmp_path, 0, manifest)
+            FakeClient(), make_dev(), tmp_path, manifest)
         assert status == "cancelled"
 
 
@@ -240,7 +216,7 @@ class TestLiteratureDownload:
     def test_web_route_writes_the_full_body(self, tmp_path, manifest):
         web = FakeWeb({"html": _tiptap("Full body"), "excerpt": "short excerpt"})
         status, msg = downloads.process_deviation(
-            FakeClient(), self._lit_dev(), tmp_path, 0, manifest,
+            FakeClient(), self._lit_dev(), tmp_path, manifest,
             dest_dir=tmp_path / "web", use_api=False, web=web)
         assert status == "downloaded"
         assert "text" in msg
@@ -251,7 +227,7 @@ class TestLiteratureDownload:
     def test_web_route_writes_an_html_document(self, tmp_path, manifest):
         web = FakeWeb({"html": _tiptap("Full body")})
         status, _ = downloads.process_deviation(
-            FakeClient(), self._lit_dev(), tmp_path, 0, manifest,
+            FakeClient(), self._lit_dev(), tmp_path, manifest,
             dest_dir=tmp_path / "web", use_api=False, web=web, text_format="html")
         assert status == "downloaded"
         dest = tmp_path / "web" / "My Poem_1260299235.html"
@@ -264,7 +240,7 @@ class TestLiteratureDownload:
     def test_web_route_falls_back_to_excerpt_when_body_empty(self, tmp_path, manifest):
         web = FakeWeb({"html": {}, "excerpt": "just the excerpt"})
         status, _ = downloads.process_deviation(
-            FakeClient(), self._lit_dev(), tmp_path, 0, manifest,
+            FakeClient(), self._lit_dev(), tmp_path, manifest,
             dest_dir=tmp_path / "web", use_api=False, web=web)
         assert status == "downloaded"
         dest = tmp_path / "web" / "My Poem_1260299235.txt"
@@ -276,7 +252,7 @@ class TestLiteratureDownload:
                 raise web_mod.WebError("unavailable")
 
         status, _ = downloads.process_deviation(
-            FakeClient(), self._lit_dev(), tmp_path, 0, manifest,
+            FakeClient(), self._lit_dev(), tmp_path, manifest,
             dest_dir=tmp_path / "web", use_api=False, web=Boom(None))
         assert status == "downloaded"
         dest = tmp_path / "web" / "My Poem_1260299235.txt"
@@ -287,7 +263,7 @@ class TestLiteratureDownload:
                "excerpt": "fallback", "content": None}
         client = FakeClient(pages=[{"html": "<p>API body</p>"}])
         status, _ = downloads.process_deviation(
-            client, dev, tmp_path, 0, manifest,
+            client, dev, tmp_path, manifest,
             dest_dir=tmp_path / "api", use_api=True)
         assert status == "downloaded"
         assert client.calls[0][0] == "deviation/content"
@@ -299,7 +275,7 @@ class TestLiteratureDownload:
                "excerpt": "fallback excerpt", "content": None}
         client = FakeClient(pages=[{"html": ""}])       # editor format: empty
         status, _ = downloads.process_deviation(
-            client, dev, tmp_path, 0, manifest,
+            client, dev, tmp_path, manifest,
             dest_dir=tmp_path / "api", use_api=True)
         assert status == "downloaded"
         dest = tmp_path / "api" / f"Api Lit_{DEV_ID[:8]}.txt"
@@ -310,16 +286,16 @@ class TestLiteratureDownload:
                "type": "literature", "content": None}
         client = FakeClient(pages=[{"html": ""}])
         status, msg = downloads.process_deviation(
-            client, dev, tmp_path, 0, manifest, use_api=True)
+            client, dev, tmp_path, manifest, use_api=True)
         assert status == "no_media"
         assert not manifest.has(DEV_ID)
 
     def test_rerun_skips_text_via_manifest(self, tmp_path, manifest):
         dev = self._lit_dev()
         web = FakeWeb({"html": _tiptap("Body")})
-        downloads.process_deviation(FakeClient(), dev, tmp_path, 0, manifest,
+        downloads.process_deviation(FakeClient(), dev, tmp_path, manifest,
                                     dest_dir=tmp_path / "web", use_api=False, web=web)
         status, msg = downloads.process_deviation(
-            FakeClient(), dev, tmp_path, 0, manifest,
+            FakeClient(), dev, tmp_path, manifest,
             dest_dir=tmp_path / "web", use_api=False, web=FakeWeb({"html": _tiptap("Body")}))
         assert status == "skipped"

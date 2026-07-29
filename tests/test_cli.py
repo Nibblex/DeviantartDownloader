@@ -48,7 +48,7 @@ class TestRun:
                              real(max_workers=max_workers, **kw))[1])
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "--web", "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0", "-w", "5", "--api-workers", "3")
+                 "--client-secret", "y", "-w", "5", "--api-workers", "3")
         cli.run()
         # The website pool is created first, then the API pool.
         assert sizes == [5, 3]
@@ -65,20 +65,18 @@ class TestRun:
         with pytest.raises(SystemExit, match="--info needs a profile"):
             cli.run()
 
-    def test_info_prints_and_downloads_nothing(self, clean_cli_env, monkeypatch):
-        seen = []
-        monkeypatch.setattr(cli, "print_profile",
-                            lambda client, web, username: seen.append(username))
-
-        def no_download(*a, **k):
-            raise AssertionError("--info must not download anything")
-
-        monkeypatch.setattr(downloads, "download_file", no_download)
-        monkeypatch.setattr(listing, "fetch_gallery", no_download)
+    def test_info_prints_and_downloads_nothing(self, clean_cli_env, monkeypatch,
+                                               no_downloads):
+        seen = {}
+        monkeypatch.setattr(cli, "print_profiles",
+                            lambda client, web, names, **kw: seen.update(
+                                names=names, **kw))
         set_argv(monkeypatch, "artist", "--client-id", "x", "--client-secret", "y",
                  "--info")
         cli.run()
-        assert seen == ["artist"]
+        assert seen["names"] == ["artist"]
+        # A profile asked for by name must fail loudly if it is gone.
+        assert seen["skip_missing"] is False
 
     def test_gallery_without_profile_exits(self, clean_cli_env, monkeypatch):
         set_argv(monkeypatch, "--client-id", "x", "--client-secret", "y",
@@ -101,7 +99,7 @@ class TestRun:
         monkeypatch.setattr(downloads, "download_file", fake_download)
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0", "-g", "sketches")
+                 "--client-secret", "y", "-g", "sketches")
         cli.run()
         assert seen["folder"] == "UUID"
         assert 'Gallery folder: "sketches"' in capsys.readouterr().out
@@ -137,7 +135,7 @@ class TestRun:
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "https://www.deviantart.com/someartist",
                  "-o", str(out), "--client-id", "x", "--client-secret", "y",
-                 "--delay", "0", "-w", "2")
+                 "-w", "2")
         cli.run()
 
         gallery = out / "someartist"
@@ -149,6 +147,9 @@ class TestRun:
         stdout = capsys.readouterr().out
         assert "Downloaded: 1" in stdout
         assert "No file: 1" in stdout
+        # A single-user run has no "Per user:" block, so the header is the only
+        # place the profile URL can show up.
+        assert "User: someartist — https://www.deviantart.com/someartist" in stdout
 
     def test_downloads_literature_as_text(self, clean_cli_env, monkeypatch, capsys):
         lit = web_item(
@@ -164,7 +165,7 @@ class TestRun:
         monkeypatch.setattr(cli, "WebClient", lambda: web)
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "--web", "-o", str(out),
-                 "--client-id", "x", "--client-secret", "y", "--delay", "0", "-w", "1")
+                 "--client-id", "x", "--client-secret", "y", "-w", "1")
         cli.run()
 
         dest = out / "artist" / "web" / "My Poem_1260299235.txt"
@@ -215,7 +216,7 @@ class TestRun:
         monkeypatch.setattr(cli, "WebClient", lambda: web)
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "--web", "-o", str(out),
-                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "--client-id", "x", "--client-secret", "y",
                  "-w", "1", "--only", "images")
         monkeypatch.setattr(downloads, "download_file", fake_download)
         cli.run()
@@ -238,7 +239,7 @@ class TestRun:
         monkeypatch.setattr(cli, "WebClient", lambda: web)
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "--web", "-o", str(out),
-                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "--client-id", "x", "--client-secret", "y",
                  "-w", "1", "--only", "literature")
         cli.run()
 
@@ -252,7 +253,7 @@ class TestRun:
         monkeypatch.setattr(cli, "WebClient", lambda: web)
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "--web", "-o", str(out),
-                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "--client-id", "x", "--client-secret", "y",
                  "-w", "1", "--only", "literature")
         cli.run()                                          # no SystemExit
         assert "No literature to download" in capsys.readouterr().out
@@ -272,7 +273,7 @@ class TestRun:
         monkeypatch.setattr(cli, "WebClient", lambda: web)
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "--web", "-o", str(out),
-                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "--client-id", "x", "--client-secret", "y",
                  "-w", "1", "--literature-format", "html")
         cli.run()
 
@@ -283,18 +284,9 @@ class TestRun:
         assert not (out / "artist" / "web" / "My Poem_1260299235.txt").exists()
 
     def test_routes_each_source_into_its_own_folder(self, clean_cli_env,
-                                                    monkeypatch, capsys):
-        web = FakeWebClient(pages=[
-            {"results": [web_item(), blocked_web_item()], "hasMore": False},
-        ])
-        monkeypatch.setattr(cli, "WebClient", lambda: web)
-        # The mature work is only resolvable through the API listing
-        api_entry = make_dev(
-            url="https://www.deviantart.com/artist/art/Mature-Art-222222222",
-            title="Mature Art")
-        monkeypatch.setattr(listing, "_api_page",
-                            lambda client, endpoint, username, offset: {
-                                "results": [api_entry], "has_more": False})
+                                                    monkeypatch, both_routes,
+                                                    capsys):
+        web = both_routes
         fetched = []
 
         def recording_download(session, url, dest, fallback=None):
@@ -305,7 +297,7 @@ class TestRun:
         monkeypatch.setattr(downloads, "download_file", recording_download)
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "--web", "-o", str(out),
-                 "--client-id", "x", "--client-secret", "y", "--delay", "0",
+                 "--client-id", "x", "--client-secret", "y",
                  "-w", "1")
         cli.run()
 
@@ -340,7 +332,7 @@ class TestRun:
                             (dest.write_bytes(b"x"), True)[1])
         out = clean_cli_env / "out"
         set_argv(monkeypatch, "artist", "--web", "-o", str(out),
-                 "--client-id", "x", "--client-secret", "y", "--delay", "0")
+                 "--client-id", "x", "--client-secret", "y")
         cli.run()
         assert (out / "artist" / "web" / "Web Art_1004952679.jpg").is_file()
 
@@ -354,7 +346,7 @@ class TestRun:
         gallery = make_user_dir(out, "someartist")
         (gallery / "_metadata.json").write_text("[{truncated", encoding="utf-8")
         set_argv(monkeypatch, "someartist", "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()
 
         assert "WARNING: could not read _metadata.json" in capsys.readouterr().out
@@ -377,7 +369,7 @@ class TestRun:
         monkeypatch.setattr(downloads, "download_file", fake_download)
         out = clean_cli_env / "out"
         argv = ("someartist", "-o", str(out), "--client-id", "x",
-                "--client-secret", "y", "--delay", "0")
+                "--client-secret", "y")
         set_argv(monkeypatch, *argv)
         cli.run()
         set_argv(monkeypatch, *argv)
@@ -403,7 +395,7 @@ class TestRun:
         out = clean_cli_env / "out"
         make_user_dir(out, "someartist")
         set_argv(monkeypatch, "someartist", "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0", flag)
+                 "--client-secret", "y", flag)
         cli.run()
         assert seen["full"] is True
 
@@ -433,6 +425,25 @@ class TestDiscoverUsers:
 
 
 @pytest.fixture
+def both_routes(monkeypatch):
+    """A gallery with one ordinary work and one the website only serves blurred,
+    so the run exercises the website route and the API route at once."""
+    web = FakeWebClient(pages=[
+        {"results": [web_item(), blocked_web_item()], "hasMore": False},
+    ])
+    monkeypatch.setattr(cli, "WebClient", lambda: web)
+    # The mature work is only resolvable through the API listing.
+    monkeypatch.setattr(listing, "_api_page",
+                        lambda client, endpoint, username, offset: {
+                            "results": [make_dev(
+                                url="https://www.deviantart.com/artist/art"
+                                    "/Mature-Art-222222222",
+                                title="Mature Art")],
+                            "has_more": False})
+    return web
+
+
+@pytest.fixture
 def galleries(monkeypatch):
     """Patch fetch_gallery/download_file; galleries dict drives the data."""
     galleries = {}
@@ -454,7 +465,7 @@ class TestSyncAll:
         galleries["bob"] = [make_dev(deviationid="ffffeeee-0000", title="Bob Art")]
 
         set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()
 
         assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
@@ -465,8 +476,12 @@ class TestSyncAll:
         # The grand total breaks the downloads down by route and per user
         assert "via API:     2 item(s)" in stdout
         assert "Per user:" in stdout
-        assert "alice  1 item(s) downloaded" in stdout
-        assert "bob    1 item(s) downloaded" in stdout
+        # Each name carries its profile URL, and the counts still line up: the
+        # shorter label is padded out to the width of the longer one.
+        assert ("alice — https://www.deviantart.com/alice  "
+                "1 item(s) downloaded") in stdout
+        assert ("bob — https://www.deviantart.com/bob      "
+                "1 item(s) downloaded") in stdout
 
     def test_empty_gallery_is_skipped_not_fatal(self, clean_cli_env, monkeypatch,
                                                 galleries, capsys):
@@ -476,7 +491,7 @@ class TestSyncAll:
         galleries["alice"] = [make_dev()]
 
         set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()
 
         assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
@@ -497,7 +512,7 @@ class TestSyncAll:
         monkeypatch.setattr(listing, "fetch_gallery", fetch)
         monkeypatch.setattr(downloads, "download_file", fake_download)
         set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()
 
         assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
@@ -525,7 +540,7 @@ class TestSyncAll:
         ]
 
         set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()
 
         # The legacy flat file is still recognised; the new one lands in api/
@@ -619,7 +634,7 @@ class TestWatchingRun:
         monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice", "bob"])
 
         set_argv(monkeypatch, "--watching", "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()
 
         assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
@@ -635,7 +650,7 @@ class TestWatchingRun:
         monkeypatch.setattr(cli, "fetch_watching", lambda client: ["ghost", "alice"])
 
         set_argv(monkeypatch, "--watching", "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()
 
         assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
@@ -649,13 +664,13 @@ class TestWatchingRun:
         monkeypatch.setattr(cli, "confirm", lambda question: False)
 
         set_argv(monkeypatch, "--watching", "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()      # a decline is not an error: it returns normally
 
         assert not out.exists()
         stdout = capsys.readouterr().out
         assert "You watch 1 user(s)." in stdout
-        assert "Cancelled; nothing was downloaded." in stdout
+        assert "Cancelled." in stdout
 
     def test_the_prompt_names_the_count_and_the_output_folder(
             self, clean_cli_env, monkeypatch, galleries):
@@ -666,10 +681,34 @@ class TestWatchingRun:
                             lambda question: asked.append(question) or False)
 
         set_argv(monkeypatch, "--watching", "-o", str(out), "--client-id", "x",
-                 "--client-secret", "y", "--delay", "0")
+                 "--client-secret", "y")
         cli.run()
 
         assert asked == [f"Download all 2 galleries into {out}?"]
+
+    def test_gallery_does_not_combine(self, clean_cli_env, monkeypatch):
+        set_argv(monkeypatch, "--watching", "-g", "Sketches", "--client-id", "x",
+                 "--client-secret", "y")
+        with pytest.raises(SystemExit, match="does not combine with --watching"):
+            cli.run()
+
+    def test_info_summarises_everyone_and_downloads_nothing(
+            self, clean_cli_env, monkeypatch, no_downloads):
+        seen, asked = {}, []
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice", "bob"])
+        monkeypatch.setattr(cli, "print_profiles",
+                            lambda client, web, names, **kw: seen.update(
+                                names=names, **kw))
+        monkeypatch.setattr(cli, "confirm",
+                            lambda question: asked.append(question) or True)
+        set_argv(monkeypatch, "--watching", "--info", "--client-id", "x",
+                 "--client-secret", "y")
+        cli.run()
+
+        assert seen["names"] == ["alice", "bob"]
+        assert seen["skip_missing"] is True     # a watchlist outlives its accounts
+        # The prompt reflects what actually happens: no download, no output folder.
+        assert asked == ["Show the profile of all 2 of them?"]
 
     def test_with_a_profile_exits(self, clean_cli_env, monkeypatch):
         set_argv(monkeypatch, "--watching", "someartist", "--client-id", "x",
@@ -685,7 +724,7 @@ class TestWatchingRun:
         monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice"])
 
         set_argv(monkeypatch, "--watching", "--login", "-o", str(out),
-                 "--client-id", "x", "--client-secret", "y", "--delay", "0")
+                 "--client-id", "x", "--client-secret", "y")
         cli.run()
 
         assert (out / "alice" / "api" / "My Art_abcd1234.png").is_file()
@@ -716,3 +755,96 @@ class TestMain:
         with pytest.raises(SystemExit) as excinfo:
             cli.main()
         assert excinfo.value.code == 130
+
+
+class TestQuiet:
+    """-q drops progress, keeps results, warnings, errors and prompts."""
+
+    def run_gallery(self, monkeypatch, galleries, out, *extra):
+        galleries["artist"] = [make_dev(),
+                               make_dev(deviationid="ffffeeee-0000", title="Second")]
+        set_argv(monkeypatch, "artist", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", *extra)
+        cli.run()
+
+    def test_progress_lines_are_dropped_but_the_summary_stays(
+            self, clean_cli_env, monkeypatch, galleries, capsys):
+        self.run_gallery(monkeypatch, galleries, clean_cli_env / "out", "-q")
+        out = capsys.readouterr().out
+        assert "[1/2]" not in out and "[2/2]" not in out   # per-work progress
+        assert "Fetching gallery listing" not in out
+        assert "Total works found" not in out
+        assert "Downloaded: api/" not in out               # nor the ones that worked
+        assert "Done. Downloaded: 2" in out                # the result survives
+        assert "Files saved to:" in out
+
+    def test_without_quiet_the_progress_is_there(self, clean_cli_env, monkeypatch,
+                                                 galleries, capsys):
+        self.run_gallery(monkeypatch, galleries, clean_cli_env / "out")
+        out = capsys.readouterr().out
+        assert "[1/2]" in out and "Total works found" in out
+
+    def test_the_works_that_failed_are_still_named(self, clean_cli_env,
+                                                    monkeypatch, capsys):
+        """-q hides what succeeded, never what went wrong."""
+        monkeypatch.setattr(listing, "fetch_gallery",
+                            lambda client, username, **kw: [
+                                make_dev(),
+                                make_dev(deviationid="ffffeeee-0000",
+                                         title="Journal", content=None)])
+        monkeypatch.setattr(downloads, "download_file",
+                            lambda session, url, dest, fallback=None: False)
+        set_argv(monkeypatch, "artist", "-o", str(clean_cli_env / "out"), "-q",
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+        out = capsys.readouterr().out
+        assert "FAILED: api/My Art_abcd1234.png" in out      # named, not just counted
+        assert "NO FILE (no text or media): Journal" in out
+        assert "Failed: 1" in out and "No file: 1" in out
+
+    def test_the_footer_names_the_route_of_each_work(self, clean_cli_env,
+                                                     monkeypatch, both_routes):
+        """Under -q the footer is the only progress, and the routes differ:
+        the API one is metered and paced, the website one is free."""
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        shown = []
+        monkeypatch.setattr(sync, "set_progress", shown.append)
+
+        set_argv(monkeypatch, "artist", "--web", "-q", "-w", "1",
+                 "-o", str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+
+        assert "listing artist" in shown[0]
+        works = [line for line in shown if "/2" in line]
+        assert any("web" in line and "Web Art" in line for line in works)
+        assert any("api" in line and "Mature Art" in line for line in works)
+
+    def test_info_still_prints_the_summary(self, clean_cli_env, monkeypatch,
+                                           capsys, no_downloads):
+        monkeypatch.setattr(cli, "print_profiles",
+                            lambda *a, **kw: print("Profile: artist"))
+        set_argv(monkeypatch, "artist", "-q", "--info",
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+        out = capsys.readouterr().out
+        assert "Profile: artist" in out          # -q must not gut --info
+        assert "Fetching profile info" not in out
+
+    def test_the_watching_prompt_is_never_silenced(self, clean_cli_env,
+                                                   monkeypatch, capsys):
+        asked = []
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice"])
+        monkeypatch.setattr(cli, "confirm",
+                            lambda question: asked.append(question) or False)
+        set_argv(monkeypatch, "--watching", "-q", "-o", str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+        assert asked and "Download all 1 galleries" in asked[0]
+        assert "You watch 1 user(s)." in capsys.readouterr().out
+
+    def test_da_quiet_turns_it_on_without_the_flag(self, clean_cli_env,
+                                                   monkeypatch, galleries, capsys):
+        monkeypatch.setenv("DA_QUIET", "true")
+        self.run_gallery(monkeypatch, galleries, clean_cli_env / "out")
+        assert "[1/2]" not in capsys.readouterr().out

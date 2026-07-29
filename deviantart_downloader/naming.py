@@ -5,10 +5,23 @@ import re
 import sys
 from urllib.parse import unquote, urlparse
 
+from .constants import WEB_BASE
 
-def extract_username(profile_url: str) -> str:
+
+def profile_url(username: str) -> str:
+    """The canonical profile URL of a username; the inverse of extract_username."""
+    return f"{WEB_BASE}/{username}"
+
+
+def profile_label(username: str, real_name: str = "") -> str:
+    """How a user is named on screen: the username, real name and profile URL."""
+    named = f"{username} ({real_name})" if real_name else username
+    return f"{named} — {profile_url(username)}"
+
+
+def extract_username(url: str) -> str:
     """Extract the username from a DeviantArt profile URL."""
-    parsed = urlparse(profile_url if "://" in profile_url else f"https://{profile_url}")
+    parsed = urlparse(url if "://" in url else f"https://{url}")
     host = parsed.netloc.lower()
 
     # Old format: https://username.deviantart.com
@@ -23,10 +36,10 @@ def extract_username(profile_url: str) -> str:
             return parts[0]
 
     # If the username was passed directly
-    if re.match(r"^[A-Za-z0-9.-]+$", profile_url) and "." not in profile_url:
-        return profile_url
+    if re.match(r"^[A-Za-z0-9.-]+$", url) and "." not in url:
+        return url
 
-    sys.exit(f"Could not extract a username from: {profile_url}")
+    sys.exit(f"Could not extract a username from: {url}")
 
 
 def username_from_url(url: str) -> str:
@@ -54,6 +67,11 @@ def deviation_key(dev: dict) -> str:
     if m:
         return m.group(1)
     return dev.get("deviationid") or ""
+
+
+def deviation_title(dev: dict) -> str:
+    """A work's title, with the placeholder used when it has none."""
+    return dev.get("title") or "untitled"
 
 
 def deviation_suffix(dev: dict) -> str:

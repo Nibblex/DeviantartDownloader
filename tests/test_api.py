@@ -117,3 +117,101 @@ class TestDeviantArtClient:
         CANCEL.set()
         with pytest.raises(CancelledByUser):
             client.api_get("gallery/all")
+
+
+class TestRateLimiter:
+    """The shared pacing and cool-down that keep the pool under the threshold."""
+
+    def test_acquire_spaces_requests_out(self):
+        limiter = api.RateLimiter(rate=100)      # 10 ms apart
+        started = time.monotonic()
+        for _ in range(3):
+            limiter.acquire()
+        # The first request goes straight through; only the gaps are paid for.
+        assert time.monotonic() - started >= 0.02
+
+    def test_a_rate_of_zero_disables_the_pacing(self):
+        limiter = api.RateLimiter(rate=0)
+        started = time.monotonic()
+        for _ in range(50):
+            limiter.acquire()
+        assert time.monotonic() - started < 0.05
+
+    def next_rung(self, limiter):
+        """The next 429, as if the previous cool-down had already elapsed.
+
+        Skipping ahead is the only way to climb the ladder without really
+        sleeping for it, and nothing public exposes the deadline.
+        """
+        limiter._blocked_until = 0
+        return limiter.penalise()
+
+    def test_penalise_climbs_the_ladder(self):
+        limiter = api.RateLimiter(rate=0)
+        rungs = [self.next_rung(limiter) for _ in range(3)]
+        assert rungs == pytest.approx(
+            [api.BASE_BACKOFF, api.BASE_BACKOFF * 2, api.BASE_BACKOFF * 4], abs=0.1)
+
+    def test_the_ladder_stops_at_the_ceiling(self):
+        limiter = api.RateLimiter(rate=0)
+        for _ in range(20):
+            held = self.next_rung(limiter)
+        assert held == pytest.approx(api.MAX_BACKOFF, abs=0.1)
+
+    def test_a_second_worker_waits_out_the_cool_down_instead_of_doubling(self):
+        limiter = api.RateLimiter(rate=0)
+        first = limiter.penalise()
+        # Three more workers hit the same 429 before the first wait elapsed.
+        others = [limiter.penalise() for _ in range(3)]
+        assert all(held <= first for held in others)
+        # One overrun costs one rung, however many workers noticed it.
+        assert limiter._backoff == api.BASE_BACKOFF
+
+    def test_an_explicit_retry_after_wins_over_the_ladder(self):
+        limiter = api.RateLimiter(rate=0)
+        assert limiter.penalise(retry_after=42) == pytest.approx(42, abs=0.1)
+        assert limiter._backoff == 0          # the ladder was never climbed
+
+    def test_a_success_resets_the_ladder(self):
+        limiter = api.RateLimiter(rate=0)
+        self.next_rung(limiter)
+        self.next_rung(limiter)               # climbed to the second rung
+        limiter.succeeded()
+        assert self.next_rung(limiter) == pytest.approx(api.BASE_BACKOFF, abs=0.1)
+
+    def test_the_cool_down_holds_every_thread(self):
+        limiter = api.RateLimiter(rate=0)
+        limiter.penalise(retry_after=0.05)
+        started = time.monotonic()
+        limiter.acquire()                     # a thread that never saw the 429
+        assert time.monotonic() - started >= 0.04
+
+    def test_acquire_aborts_when_the_user_quits(self):
+        limiter = api.RateLimiter(rate=0)
+        CANCEL.set()
+        with pytest.raises(CancelledByUser):
+            limiter.acquire()
+
+
+class TestApiGetPacing:
+    def test_a_429_holds_the_pool_and_a_success_clears_it(self, tmp_path, capsys,
+                                                          monkeypatch):
+        # A real, but negligible, rung: the cool-down has to be genuinely taken
+        # for the reset afterwards to mean anything.
+        monkeypatch.setattr(api, "BASE_BACKOFF", 0.01)
+        session = FakeSession(get_responses=[
+            FakeResponse(429),                # no Retry-After, as DeviantArt sends
+            FakeResponse(200, {"ok": True}),
+        ])
+        client = make_client(tmp_path, session)
+        assert client.api_get("gallery/all") == {"ok": True}
+        assert "holding every worker" in capsys.readouterr().out
+        assert client.limiter._backoff == 0        # reset by the success
+
+    def test_every_request_goes_through_the_limiter(self, tmp_path):
+        session = FakeSession(get_responses=[FakeResponse(200, {"ok": True})])
+        client = make_client(tmp_path, session)
+        seen = []
+        client.limiter.acquire = lambda: seen.append(1)
+        client.api_get("gallery/all")
+        assert seen == [1]

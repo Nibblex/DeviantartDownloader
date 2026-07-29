@@ -15,9 +15,9 @@ import time
 import pytest
 import requests
 
-from deviantart_downloader import cli
+from deviantart_downloader import cli, controls, downloads, listing
 from deviantart_downloader.api import DeviantArtClient
-from deviantart_downloader.constants import CANCEL, RESUME
+from deviantart_downloader.constants import CANCEL, RESUME, VERBOSE
 
 DEV_ID = "abcd1234-5678-90ab-cdef-1234567890ab"
 
@@ -26,14 +26,20 @@ WEB_URL = f"https://www.deviantart.com/artist/art/Web-Art-{WEB_ID}"
 BASE_URI = "https://images-wixmp-abc.wixmp.com/f/uuid/file.jpg"
 
 
+def _reset_flags():
+    CANCEL.clear()
+    RESUME.set()
+    VERBOSE.set()
+    controls._PROGRESS = ""
+
+
 @pytest.fixture(autouse=True)
 def fresh_cancel():
-    """Every module shares the CANCEL/RESUME events; reset them around each test."""
-    CANCEL.clear()
-    RESUME.set()
+    """The CANCEL/RESUME/VERBOSE flags are shared by every module: reset them
+    around each test so one run's -q or 'q' cannot leak into the next."""
+    _reset_flags()
     yield
-    CANCEL.clear()
-    RESUME.set()
+    _reset_flags()
 
 
 class OfflineSession:
@@ -53,6 +59,16 @@ class OfflineSession:
 def no_network(monkeypatch):
     """A real request is a test bug, not a reason to skip."""
     monkeypatch.setattr(requests, "Session", OfflineSession)
+
+
+@pytest.fixture
+def no_downloads(monkeypatch):
+    """Fail loudly if a run that should only inspect starts fetching works."""
+    def forbidden(*a, **k):
+        raise AssertionError("this run must not download anything")
+
+    monkeypatch.setattr(downloads, "download_file", forbidden)
+    monkeypatch.setattr(listing, "fetch_gallery", forbidden)
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +125,11 @@ def token_response():
                               "expires_in": 3600})
 
 
-def make_client(tmp_path, session, fresh_token=True):
-    client = DeviantArtClient("id", "secret", token_file=tmp_path / "token.json")
+def make_client(tmp_path, session, fresh_token=True, api_rate=0):
+    # Unpaced by default: the tests script their own responses, so real-time
+    # throttling would only make the suite slow. RateLimiter is tested directly.
+    client = DeviantArtClient("id", "secret", token_file=tmp_path / "token.json",
+                              api_rate=api_rate)
     client.session = session
     if fresh_token:
         client._token_expiry = time.time() + 1000
@@ -234,7 +253,7 @@ def clean_cli_env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "load_dotenv", lambda path=None: None)
     for var in ("DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_WORKERS", "DA_UNBLUR",
-                "DA_OUTPUT", "DA_FORCE_API"):
+                "DA_OUTPUT", "DA_FORCE_API", "DA_QUIET"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 

@@ -21,7 +21,7 @@ Each route saves to its own subfolder inside the gallery folder. `--force-api` r
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
 - Downloads literature and journals too: text works have no media file, so their full body is saved next to the images as plain text (`.txt`) or a standalone HTML document (`.html`), your choice with `--literature-format`. The body is fetched from the website for no API quota, falling back to the listing excerpt when it is unavailable. Restrict a run to one kind of work with `--only images` or `--only literature`.
 - Downloads mature content unblurred when you log in with your account (`--login`, see below). Without login, `--unblur`/`DA_UNBLUR=true` strips the blur where possible: works uploaded since ~mid-2021 have their URL token pinned to the blurred version, so for those the blurred preview is downloaded instead.
-- Parallel downloads with retries and API rate-limit handling. The website route needs no OAuth call at all, so a re-sync of an all-ages gallery costs zero API requests.
+- Parallel downloads with retries and API rate-limit handling: every worker draws from one shared budget (`DA_API_RATE`, 3 requests/second by default), and a 429 holds the whole pool back instead of each thread backing off on its own. The website route needs no OAuth call at all, so a re-sync of an all-ages gallery costs zero API requests.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
 - Run it with no arguments to re-sync every user already present in the output folder with their latest works, or with `--watching` to download every user your account watches.
 - Re-syncs are incremental: the gallery listing stops as soon as it reaches a page of already-downloaded works (`--full` forces a complete walk).
@@ -51,9 +51,11 @@ DA_WEB_WORKERS=4
 # Optional: simultaneous API downloads (default: 2); kept low so parallel API
 # requests don't trip the rate limit
 DA_API_WORKERS=2
-# Optional: pause in seconds after each API download, per thread (default: 0.5);
-# the website route costs no quota and is never delayed
-DA_DELAY=0.5
+# Optional: API requests per second, shared by every worker (default: 3);
+# 0 disables the pacing
+DA_API_RATE=3
+# Optional: report only results, dropping the per-work progress lines
+DA_QUIET=false
 # Optional: strip the blur filter the API applies to mature-content previews
 # (default: false, images are kept as the API serves them)
 DA_UNBLUR=false
@@ -84,15 +86,17 @@ deviantart-downloader username -g "Sketches"  # only the named gallery folder (c
 deviantart-downloader username -o my_folder   # output folder (default: DA_OUTPUT or downloads)
 deviantart-downloader username -w 8           # simultaneous website downloads
 deviantart-downloader username --api-workers 3  # simultaneous API downloads (default: 2)
-deviantart-downloader username --delay 1.0    # pause after each API download, per thread
+deviantart-downloader username --api-rate 2   # API requests per second, all workers (default: 3)
 deviantart-downloader username --redownload-missing  # restore manually deleted files
 deviantart-downloader username --unblur       # strip the blur on mature-content previews
 deviantart-downloader username --literature-format html  # save literature/journals as .html (default: txt)
 deviantart-downloader username --only images       # download only images (skip literature/journals)
 deviantart-downloader username --only literature    # download only literature/journals
+deviantart-downloader username -q             # only results: no per-work progress lines
 deviantart-downloader username --full         # walk the entire gallery listing
 deviantart-downloader username --force-api    # route everything through the API
 deviantart-downloader --watching              # download every user you watch (needs --login)
+deviantart-downloader --watching --info       # just summarise them, download nothing
 ```
 
 ### Try it on a demo profile
@@ -104,6 +108,16 @@ deviantart-downloader test --info     # inspect it first: profile + gallery coun
 deviantart-downloader test -o demo     # download all 18 works into ./demo/test/
 ```
 
+Pass `-q/--quiet` (or `DA_QUIET=true`) when the progress is more noise than signal — a long sync prints one line per work, and `--watching` multiplies that by every user you follow. It drops the lines for works that *succeeded*; summaries, the works that failed, warnings, errors and the `--watching` confirmation still print, so a quiet run still tells you what happened and what went wrong. On the demo profile below that is 34 lines of output against 8. It layers on anything else: `--watching -q`, `--info -q`, `--only images -q`.
+
+Progress does not disappear, it moves: in a terminal it goes to the status line pinned at the bottom, next to the keyboard controls, so a quiet run still shows what it is working on.
+
+```
+[running]  12/900  api  Crystal ID  keys: [p] pause  [r] resume  [q] quit
+```
+
+It names the route each work took, since the two behave nothing alike: `web` costs no quota and runs at `-w` workers, `api` is metered and paced by `--api-rate`. The line is trimmed to the terminal width, dropping the keys hint first. Piped or redirected, there is no status line and `-q` simply prints less.
+
 Every run ends with a summary broken down by route, size and (when syncing several users) per user:
 
 ```
@@ -114,7 +128,9 @@ Done. Downloaded: 18 | Skipped (already existed): 0 | No file: 0 | Failed: 0
 Files saved to: /.../demo/test
 ```
 
-Pass `-i/--info` to print a profile summary — profile URL, avatar and banner URLs, bio, location, birthday, "deviant for X years", links, statistics and every gallery folder with its item count — and exit without downloading anything. DeviantArt does not expose pronouns through its endpoints, so those are not shown.
+Pass `-i/--info` to print a profile summary — profile URL, avatar and banner URLs, bio, location, birthday, "deviant for X years", links, statistics and every gallery folder with its item count — and exit without downloading anything. Combined with `--watching` it summarises every user you watch instead of one profile. DeviantArt does not expose pronouns through its endpoints, so those are not shown.
+
+The whole summary comes off the website, so `--info` costs **no API quota at all** — which is what makes `--watching --info` viable over a long watchlist. The website does not publish the real name or a readable artist specialty; add `--force-api` to fetch the profile through the API and get those two back, at one request per user. (The bio is not a reason to: the API's bio field comes back empty on current profiles, while the website carries the full text.)
 
 Pass `-g/--gallery "NAME"` to download only one gallery folder instead of the whole gallery (the name is matched case-insensitively; if it doesn't exist the tool lists the folders that do). Files land in the same `<output>/<username>/` folder as a full sync, so works are never downloaded twice across runs.
 
@@ -157,11 +173,47 @@ You watch 98 user(s).
 Download all 98 galleries into downloads? [y/N]
 ```
 
-Anything but `y`/`yes` cancels without downloading anything. When stdin is piped or redirected the question is skipped and the run goes ahead, so `--watching` still works unattended from a cron job or a script.
+Anything but `y`/`yes` cancels. When stdin is piped or redirected the question is skipped and the run goes ahead, so `--watching` still works unattended from a cron job or a script — which also means a redirected stdin starts the whole download with no confirmation.
 
-It needs that saved session: without it the token belongs to the application, which watches nobody. Every other option applies per user as usual, so `--watching --only images` or `--watching --full` do what you would expect. The list is fetched fresh on each run, so people you started or stopped watching are picked up automatically.
+It needs that saved session: without it the token belongs to the application, which watches nobody. The list is fetched fresh on each run, so people you started or stopped watching are picked up automatically.
+
+Most options apply per user as usual, so `--watching --only images` or `--watching --full` do what you would expect:
+
+| Option | With `--watching` |
+| --- | --- |
+| `--only`, `--full`, `--redownload-missing`, `--unblur`, `--literature-format`, `--api-rate`, `-q`, `-w`, `--api-workers`, `-o`, `--force-api` | Applied to every watched user |
+| `-i/--info` | Summarises every watched profile instead of downloading |
+| `-g/--gallery` | Rejected: folder names differ from one profile to the next, so one name cannot be asked of everyone you watch |
+
+One of those is worth thinking about before you use it on a long watchlist: `--redownload-missing` implies `--full`, so it walks every listing of every watched user from end to end instead of stopping at the first page already downloaded.
+
+`--unblur` is close to pointless here: `--watching` already requires the logged-in session, and with it mature works arrive unblurred anyway (`--unblur` exists for runs without `--login`).
 
 Re-runs are incremental like any other sync, and a watched user whose account has since been deactivated is skipped with a notice. This is not a setting you want in `.env`: it is an action, and every run downloads every gallery you watch.
+
+## Staying under the API rate limit
+
+DeviantArt answers an overrun with `user_api_threshold`. That limit is **per account, not per endpoint**, and it reacts to short bursts rather than to a running total — so spreading the work over different endpoints buys nothing, and the only thing that helps is not going too fast.
+
+Two mechanisms keep a run under it:
+
+- **One shared budget.** Every API request, whichever endpoint it is for and whichever worker makes it, is paced through a single limiter at `DA_API_RATE` requests per second (3 by default, `--api-rate` to override, `0` to disable). Workers queue for the next slot instead of racing each other, so the request rate stays flat no matter how you set `--api-workers`.
+- **One shared cool-down.** When a 429 does arrive, the first worker to see it backs off *the whole pool*, and the others wait that out rather than each starting their own ladder. Since a 429 means the account is going too fast, that is true of every worker at once; letting the rest keep firing only earns more 429s. The wait doubles from 4 s up to a 5-minute ceiling and resets after any request gets through.
+
+Note that DeviantArt sends no `Retry-After` header and no rate-limit headers of any kind, so the wait is a blind ladder. The header is honoured if it ever appears.
+
+The default rate was picked by measuring it. Thirty back-to-back API calls, run twice against the same account:
+
+| | Calls completed | HTTP requests | 429s | Wall time |
+| --- | --- | --- | --- | --- |
+| Unpaced (`--api-rate 0`) | 30/30 | 45 | 15 | 222 s |
+| Paced (`--api-rate 3`) | 30/30 | 30 | 0 | 13 s |
+
+Unpaced, a third of the requests were rejected and had to be retried, so 30 calls cost 45 requests and most of the time went into backoff waits. Paced, the same work cost exactly 30 requests and never tripped the limit. Going slower on purpose finished **17× faster**.
+
+Your mileage will differ: the threshold appears to run over a long window, so a run that starts with quota already spent — by an earlier run, or by the same account downloading somewhere else — will see 429s at any rate. If that happens, lower `DA_API_RATE`; if you never see one, raise it.
+
+The website route is not affected by any of this: it needs no OAuth and costs no quota, which is why a re-sync of an all-ages gallery makes zero API requests.
 
 ## Unblurred mature content (`--login`)
 

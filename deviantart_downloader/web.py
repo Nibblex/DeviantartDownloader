@@ -9,10 +9,10 @@ import threading
 
 import requests
 
-from .constants import (BROWSER_USER_AGENT, CANCEL, DEVIATION_INIT_URL,
+from .constants import (BROWSER_USER_AGENT, DEVIATION_INIT_URL,
                         GALLECTION_FOLDERS_URL, GALLECTION_URL,
                         PROFILE_ABOUT_URL, WEB_BASE, WEB_PAGE_LIMIT, WEB_SUBDIR,
-                        CancelledByUser)
+                        sleep_or_cancel)
 
 
 class WebError(RuntimeError):
@@ -68,8 +68,7 @@ class WebClient:
             if resp.status_code == 429:
                 wait = 5 * (attempt + 1)
                 print(f"  Website throttling the listing, waiting {wait} s...")
-                if CANCEL.wait(wait):
-                    raise CancelledByUser("Cancelled by the user")
+                sleep_or_cancel(wait)
                 continue
             if resp.status_code != 200:
                 raise WebError(f"the website answered HTTP {resp.status_code}")

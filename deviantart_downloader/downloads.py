@@ -9,7 +9,8 @@ from .api import DeviantArtClient
 from .constants import CANCEL, wait_if_paused
 from .literature import KIND_HTML, KIND_TEXT, classify_web_html, is_text_work
 from .manifest import DownloadManifest
-from .naming import (deviation_key, deviation_suffix, guess_extension,
+from .naming import (deviation_key, deviation_suffix, deviation_title,
+                     guess_extension,
                      sanitize_filename, unblur_wixmp_url, username_from_url)
 from .web import WebClient, WebError
 
@@ -82,7 +83,7 @@ def resolve_literature(dev: dict, client: DeviantArtClient,
 
 def _write_text(kind: str, payload: str, text_format: str, title: str, dev: dict,
                 out_dir: Path, dest_dir: Path, manifest: DownloadManifest,
-                key: str, delay: float, use_api: bool) -> tuple[str, str]:
+                key: str) -> tuple[str, str]:
     """Write a text work to a .txt/.html file, mirroring the media download path."""
     body = literature.render(kind, payload, text_format)
     if text_format == "html":
@@ -99,15 +100,13 @@ def _write_text(kind: str, payload: str, text_format: str, title: str, dev: dict
     if CANCEL.is_set():
         return "cancelled", f"Cancelled: {title}"
     dest.write_text(content, encoding="utf-8")
-    if delay and use_api:
-        CANCEL.wait(delay)
     if key:
         manifest.add(key, rel)
     return "downloaded", f"Downloaded (text): {rel}"
 
 
 def process_deviation(
-    client: DeviantArtClient, dev: dict, out_dir: Path, delay: float,
+    client: DeviantArtClient, dev: dict, out_dir: Path,
     manifest: DownloadManifest, redownload_missing: bool = False,
     unblur: bool = False, *, dest_dir: Path | None = None,
     session: requests.Session | None = None, use_api: bool = True,
@@ -119,7 +118,7 @@ def process_deviation(
     recorded in the manifest under its path relative to out_dir. With use_api
     False no API call is made, so the work is resolved from the listing alone.
     """
-    title = dev.get("title") or "untitled"
+    title = deviation_title(dev)
     dev_id = dev.get("deviationid", "")
     key = deviation_key(dev)
     dest_dir = dest_dir or out_dir
@@ -141,7 +140,14 @@ def process_deviation(
             return "skipped", f"Deleted locally, skipped: {existing or title}"
         # --redownload-missing: restore the manually deleted file.
 
-    # 1) Prefer the original file if the author allows downloading it
+    # 1) Prefer the original file if the author allows downloading it.
+    #
+    # This costs one API request per work, and the website route cannot take it
+    # over: its deviation page does carry a download URL (extended.download),
+    # but that URL answers 404 to anyone without a logged-in browser session,
+    # which the OAuth flow does not provide. Works the website only serves
+    # blurred are not offered one there at all. So the API is the only source
+    # of originals, and content.src (the derived fullview) is the fallback.
     file_url = None
     fallback_url = None
     if use_api and dev.get("is_downloadable"):
@@ -168,7 +174,7 @@ def process_deviation(
             if resolved is not None:
                 kind, payload = resolved
                 return _write_text(kind, payload, text_format, title, dev, out_dir,
-                                   dest_dir, manifest, key, delay, use_api)
+                                   dest_dir, manifest, key)
         return "no_media", f"NO FILE (no text or media): {title}"
 
     ext = guess_extension(file_url)
@@ -182,9 +188,6 @@ def process_deviation(
         return "skipped", f"Already exists, skipped: {rel}"
 
     ok = download_file(session, file_url, dest, fallback_url)
-    if delay and use_api:
-        # Only the API route is throttled; the website route costs no quota.
-        CANCEL.wait(delay)  # like time.sleep(delay), but wakes up on Ctrl+C
     if ok:
         if key:
             manifest.add(key, rel)

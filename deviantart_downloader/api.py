@@ -8,8 +8,12 @@ from pathlib import Path
 
 import requests
 
-from .constants import (API_BASE, CANCEL, CancelledByUser, TOKEN_FILE,
-                        TOKEN_URL, USER_AGENT)
+from .constants import (API_BASE, API_RATE, CANCEL, TOKEN_FILE, TOKEN_URL,
+                        USER_AGENT, sleep_or_cancel)
+
+MAX_ATTEMPTS = 10
+BASE_BACKOFF = 4      # seconds to hold off after the first 429
+MAX_BACKOFF = 300     # and the ceiling the doubling stops at
 
 
 class ApiError(RuntimeError):
@@ -45,13 +49,78 @@ def _user_not_found(resp: requests.Response) -> str | None:
     return None
 
 
+class RateLimiter:
+    """Paces every API request, and holds the whole pool back after a 429.
+
+    DeviantArt answers an overrun with "user_api_threshold": the limit is per
+    account rather than per endpoint, and it reacts to short bursts more than
+    to a running total, so the pacing is one rate shared by every call.
+
+    The cool-down is shared for the same reason. A 429 means the account is
+    going too fast, which is true of every worker at once, not just the one
+    that happened to be told; letting the others keep firing only earns more
+    429s and a longer block. So the first worker to see one backs the whole
+    pool off, and the rest wait that out instead of each starting a ladder.
+    """
+
+    def __init__(self, rate: float = API_RATE):
+        # A rate of 0 disables the pacing (the cool-down still applies).
+        self.rate = rate
+        self._lock = threading.Lock()
+        # The two deadlines are kept apart: _next_slot is the pacing alone and
+        # _blocked_until the cool-down alone, and acquire honours whichever is
+        # further out. Folding one into the other would hide which is in force.
+        self._next_slot = 0.0        # earliest monotonic time for the next request
+        self._blocked_until = 0.0    # cool-down after a 429, shared by every thread
+        self._backoff = 0.0          # current rung of the ladder, reset by a success
+
+    def acquire(self) -> None:
+        """Block until this thread may issue a request.
+
+        Each caller reserves the next free slot under the lock, so concurrent
+        workers queue up at the configured rate instead of racing each other.
+        """
+        interval = 1.0 / self.rate if self.rate > 0 else 0.0
+        with self._lock:
+            slot = max(self._next_slot, self._blocked_until, time.monotonic())
+            self._next_slot = slot + interval
+        # Consulted even when there is nothing to wait for, so a 'q' pressed
+        # mid-run stops the pool before it issues another request.
+        sleep_or_cancel(slot - time.monotonic())
+
+    def penalise(self, retry_after: float | None = None) -> float:
+        """Back the whole pool off after a 429; returns the seconds held.
+
+        Doubling once per worker would turn one overrun into a several-minute
+        block, so only the first worker to see a 429 climbs the ladder.
+        """
+        with self._lock:
+            now = time.monotonic()
+            # A cool-down already running means another worker has paid for this
+            # round; leaving retry_after None then only reports what is left.
+            if retry_after is None and now >= self._blocked_until:
+                self._backoff = (min(self._backoff * 2, MAX_BACKOFF)
+                                 if self._backoff else BASE_BACKOFF)
+                retry_after = self._backoff
+            self._blocked_until = max(self._blocked_until, now + (retry_after or 0.0))
+            return self._blocked_until - now
+
+    def succeeded(self) -> None:
+        """A request got through: start the ladder from the bottom again."""
+        with self._lock:
+            self._backoff = 0.0
+
+
 class DeviantArtClient:
-    def __init__(self, client_id: str, client_secret: str, token_file: Path = TOKEN_FILE):
+    def __init__(self, client_id: str, client_secret: str,
+                 token_file: Path = TOKEN_FILE, api_rate: float = API_RATE):
         self.client_id = client_id
         self.client_secret = client_secret
         self.token_file = token_file
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
+        # Shared by every worker: one client instance serves the whole run.
+        self.limiter = RateLimiter(api_rate)
         self._token_expiry = 0.0
         self._token_lock = threading.Lock()
 
@@ -66,6 +135,9 @@ class DeviantArtClient:
                 self._refresh_token()
 
     def _token_request(self, grant: dict, error_hint: str) -> dict:
+        # Token POSTs draw on the same per-account budget as everything else,
+        # and a 401 loop can fire several in a row; pace them too.
+        self.limiter.acquire()
         resp = self.session.post(
             TOKEN_URL,
             data={
@@ -120,34 +192,39 @@ class DeviantArtClient:
         self._apply_token(data)
 
     def api_get(self, endpoint: str, params: dict | None = None) -> dict:
-        """GET against the API with automatic token renewal and retries."""
+        """GET against the API, paced, with token renewal and retries.
+
+        Every request goes through the shared limiter, so the cool-down a 429
+        sets is enforced by the same gate that paces ordinary calls: the wait
+        happens on the next acquire rather than in this loop.
+        """
         self._ensure_token()
 
         url = f"{API_BASE}/{endpoint.lstrip('/')}"
-        max_attempts = 10
-        backoff = 4
-        for attempt in range(max_attempts):
+        for attempt in range(MAX_ATTEMPTS):
+            self.limiter.acquire()
             resp = self.session.get(url, params=params, timeout=30)
             if resp.status_code == 401:
                 self._ensure_token(force=True)
                 continue
             if resp.status_code == 429:
-                if attempt + 1 == max_attempts:
+                if attempt + 1 == MAX_ATTEMPTS:
                     break
-                retry_after = resp.headers.get("Retry-After", "")
-                wait = int(retry_after) if retry_after.isdigit() else backoff
-                backoff = min(backoff * 2, 300)
-                print(f"  Rate limit reached, waiting {wait} s...")
-                if CANCEL.wait(wait):
-                    raise CancelledByUser("Cancelled by the user")
+                # DeviantArt does not currently send Retry-After; it is honoured
+                # in case that changes, and the ladder covers its absence.
+                header = resp.headers.get("Retry-After", "")
+                held = self.limiter.penalise(int(header) if header.isdigit() else None)
+                print(f"  Rate limit reached, holding every worker for {held:.0f} s...")
                 continue
             if resp.status_code == 400 and (detail := _user_not_found(resp)):
                 raise UserNotFoundError(detail)
             resp.raise_for_status()
+            self.limiter.succeeded()
             return resp.json()
+        advice = (f" Consider lowering DA_API_RATE (currently "
+                  f"{self.limiter.rate:g}/s)." if self.limiter.rate else "")
         raise ApiError(
             f"DeviantArt kept rate-limiting {url} after every retry "
-            "(the block usually clears after a few minutes).\n"
-            "Try again later, and consider lowering DA_WORKERS to 4 or less "
-            "if it keeps happening."
+            f"(the block usually clears after a few minutes).\n"
+            f"Try again later.{advice}"
         )

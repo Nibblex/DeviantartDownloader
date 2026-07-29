@@ -6,13 +6,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .api import DeviantArtClient, UserNotFoundError
-from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR, CancelledByUser
-from .controls import KeyboardControls
+from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR, CancelledByUser, say
+from .controls import KeyboardControls, set_progress
 from .downloads import process_deviation
 from .listing import list_gallery, resolve_via_api
 from .literature import is_text_work
 from .manifest import DownloadManifest
-from .naming import deviation_key
+from .naming import deviation_key, deviation_title, profile_label
 from .storage import read_json, write_json
 from .web import WebClient, needs_api
 
@@ -57,8 +57,10 @@ def new_stats() -> dict:
     stats = {status: 0 for status in STATUSES}
     stats["bytes"] = 0
     stats["elapsed"] = 0.0
-    stats["web"] = {"downloaded": 0, "bytes": 0}
-    stats["api"] = {"downloaded": 0, "bytes": 0}
+    # Keyed by the subdir each route writes to, so a job's subdir indexes its
+    # own counters with no translation in between.
+    stats[WEB_SUBDIR] = {"downloaded": 0, "bytes": 0}
+    stats[API_SUBDIR] = {"downloaded": 0, "bytes": 0}
     return stats
 
 
@@ -68,7 +70,7 @@ def add_stats(dest: dict, src: dict) -> None:
         dest[status] += src[status]
     dest["bytes"] += src["bytes"]
     dest["elapsed"] += src["elapsed"]
-    for route in ("web", "api"):
+    for route in (WEB_SUBDIR, API_SUBDIR):
         dest[route]["downloaded"] += src[route]["downloaded"]
         dest[route]["bytes"] += src[route]["bytes"]
 
@@ -89,7 +91,7 @@ def summary_lines(stats: dict, *, users: int | None = None) -> list[str]:
         lines[0] += f" | Cancelled: {stats['cancelled']}"
 
     if stats["downloaded"]:
-        web, api = stats["web"], stats["api"]
+        web, api = stats[WEB_SUBDIR], stats[API_SUBDIR]
         lines.append(
             f"  · via website: {web['downloaded']} item(s), "
             f"{human_size(web['bytes'])}"
@@ -157,8 +159,8 @@ def fetch_watching(client: DeviantArtClient) -> list[str]:
         results = data.get("results", [])
         usernames += [name for r in results
                       if (name := (r.get("user") or {}).get("username"))]
-        print(f"  Page at offset {offset}: {len(results)} watched user(s) "
-              f"(total: {len(usernames)})")
+        say(f"  Page at offset {offset}: {len(results)} watched user(s) "
+            f"(total: {len(usernames)})")
         if not data.get("has_more"):
             break
         offset = data.get("next_offset") or offset + WATCH_PAGE_LIMIT
@@ -169,7 +171,7 @@ def fetch_watching(client: DeviantArtClient) -> list[str]:
 
 def sync_gallery(
     client: DeviantArtClient, username: str, output_root: Path, *,
-    delay: float, web_workers: int, api_workers: int,
+    web_workers: int, api_workers: int,
     redownload_missing: bool, unblur: bool,
     full: bool = False, web: WebClient | None = None, gallery: str | None = None,
     text_format: str = "txt", only: str | None = None,
@@ -180,10 +182,10 @@ def sync_gallery(
     With a gallery name only that folder is downloaded instead of the whole
     gallery. Exits with code 130 if the user interrupts with Ctrl+C.
     """
-    print(f"User: {username}")
+    print(f"User: {profile_label(username)}")
     if gallery:
         print(f'Gallery folder: "{gallery}"')
-    print("Fetching gallery listing...")
+    say("Fetching gallery listing...")
     out_dir = output_root / username
     # Loading the manifest before fetching lets the listing stop at the
     # first fully downloaded page. --redownload-missing needs the whole
@@ -197,13 +199,14 @@ def sync_gallery(
     if manifest is not None and web is not None and previous_meta:
         migrated = manifest.adopt_web_keys(previous_meta)
         if migrated:
-            print(f"  Re-keyed {migrated} previously downloaded work(s) so both "
-                  "routes recognise them.")
+            say(f"  Re-keyed {migrated} previously downloaded work(s) so both "
+                "routes recognise them.")
 
     listing_full = full or redownload_missing
     # The controls cover the whole job, so 'q' stops a long listing too and 'p'
     # pauses it; the listing and routing loops watch CANCEL/RESUME themselves.
     with KeyboardControls():
+        set_progress(f"listing {username}")
         try:
             deviations, from_web = list_gallery(client, web, username,
                                                 manifest=manifest, full=listing_full,
@@ -222,11 +225,11 @@ def sync_gallery(
         deviations, dropped = filter_by_content(deviations, only)
         if dropped:
             other = "literature/journals" if only == "images" else "images"
-            print(f"  Content filter (--only {only}): skipped {dropped} {other}.")
+            say(f"  Content filter (--only {only}): skipped {dropped} {other}.")
         if not deviations:
             print(f"No {only} to download in this gallery.")
             return new_stats()
-        print(f"\nTotal works found: {len(deviations)}\n")
+        say(f"\nTotal works found: {len(deviations)}\n")
 
         out_dir.mkdir(parents=True, exist_ok=True)
         if manifest is None:
@@ -248,8 +251,8 @@ def sync_gallery(
             _quit_before_download()
         jobs = [(d, WEB_SUBDIR) for d in web_devs] + [(d, API_SUBDIR) for d in blocked]
         if from_web:
-            print(f"Route: {len(web_devs)} via the website ({WEB_SUBDIR}/), "
-                  f"{len(blocked)} via the API ({API_SUBDIR}/).\n")
+            say(f"Route: {len(web_devs)} via the website ({WEB_SUBDIR}/), "
+                f"{len(blocked)} via the API ({API_SUBDIR}/).\n")
 
         # Save the full metadata in case it is needed later. Merge with the
         # previous file so works beyond the early stop point are kept.
@@ -278,7 +281,7 @@ def sync_gallery(
             for dev, subdir in jobs:
                 pool = api_pool if subdir == API_SUBDIR else web_pool
                 futures[pool.submit(
-                    process_deviation, client, dev, out_dir, delay, manifest,
+                    process_deviation, client, dev, out_dir, manifest,
                     redownload_missing, unblur,
                     dest_dir=out_dir / subdir,
                     session=web.session if subdir == WEB_SUBDIR else None,
@@ -299,11 +302,19 @@ def sync_gallery(
                         rel = manifest.filename_for(deviation_key(dev))
                         dest = out_dir / rel if rel else None
                         size = dest.stat().st_size if dest and dest.is_file() else 0
-                        route = "web" if subdir == WEB_SUBDIR else "api"
-                        counts[route]["downloaded"] += 1
-                        counts[route]["bytes"] += size
+                        counts[subdir]["downloaded"] += 1
+                        counts[subdir]["bytes"] += size
                         counts["bytes"] += size
-                    print(f"[{done}/{total}] {message}")
+                    # A failure, an empty work or a cancellation is a result,
+                    # not progress: -q drops the running commentary, never the
+                    # works that did not make it.
+                    line = say if status in ("downloaded", "skipped") else print
+                    line(f"[{done}/{total}] {message}")
+                    # The footer names the route too: the scrolling lines carry
+                    # it in the path (web/… or api/…), but under -q the footer is
+                    # all there is, and the two behave nothing alike -- the API
+                    # one is metered and paced, the website one free.
+                    set_progress(f"{done}/{total}  {subdir}  {deviation_title(dev)}")
                     if CANCEL.is_set():           # the user pressed 'q'
                         interrupted = True
                         web_pool.shutdown(cancel_futures=True)

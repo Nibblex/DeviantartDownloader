@@ -169,3 +169,43 @@ class TestKeyboardControls:
             assert _wait_until(CANCEL.is_set)
         assert kc.active is False           # __exit__ restored the terminal
         os.close(master)
+
+
+class TestFooterProgress:
+    """Under -q the footer is the only progress a run shows, so it carries it."""
+
+    def test_progress_sits_between_the_state_and_the_keys(self):
+        controls.set_progress("42/900  Crystal ID")
+        text = controls.footer_text(width=200)
+        assert text.index("[running]") < text.index("42/900") < text.index("keys:")
+
+    def test_no_progress_leaves_the_footer_as_it_was(self):
+        assert controls.footer_text(width=200) == (
+            "[running]  keys: [p] pause  [r] resume  [q] quit")
+
+    def test_a_narrow_terminal_trims_the_keys_before_the_progress(self):
+        controls.set_progress("42/900  Crystal ID")
+        text = controls.footer_text(width=30)
+        assert len(text) == 30
+        assert "42/900" in text and "resume" not in text
+
+    def test_progress_survives_a_pause_and_a_quit(self):
+        # TestFooterText already pins the state strings; this pins that the
+        # progress rides through a state change rather than being reset by it.
+        controls.set_progress("42/900")
+        for key in "pq":
+            controls.apply_key(key)
+            assert "42/900" in controls.footer_text(width=200)
+
+    def test_off_a_terminal_it_records_without_drawing(self):
+        # stdout is not the footer writer here, so there is nothing to draw on.
+        controls.set_progress("42/900")      # must not raise
+        assert controls._PROGRESS == "42/900"
+
+    def test_leaving_the_controls_clears_the_progress(self):
+        controls.set_progress("42/900")
+        with controls.KeyboardControls(stream=io.StringIO()):
+            pass
+        assert controls._PROGRESS == ""      # the next user starts clean
+        assert controls.footer_text(width=200) == (
+            "[running]  keys: [p] pause  [r] resume  [q] quit")

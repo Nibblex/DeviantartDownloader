@@ -8,16 +8,19 @@ constants:
   * r -> resume     (workers run again)
   * q -> quit       (like Ctrl+C: stop and clean up)
 
-The available keys and the current state are shown on a status line pinned to
-the bottom of the terminal: stdout is wrapped so every line the program prints
-scrolls above that footer, which is redrawn underneath and updated the moment
-a key is pressed.
+The available keys, the current state and what the run is working on are shown
+on a status line pinned to the bottom of the terminal: stdout is wrapped so
+every line the program prints scrolls above that footer, which is redrawn
+underneath and updated the moment a key is pressed or progress moves. That
+makes the footer the progress channel for -q, which drops the scrolling
+commentary but should still show a sign of life.
 
 This needs a real terminal; when stdout is not a TTY (piped, tests, a non-POSIX
 platform) the controls and the footer are inactive and output is unchanged.
 Ctrl+C keeps working either way: cbreak mode leaves the terminal's signals on.
 """
 
+import shutil
 import sys
 import threading
 
@@ -34,13 +37,44 @@ except ImportError:                       # non-POSIX platform
 _CLEAR_LINE = "\r\x1b[2K"                  # carriage return + erase whole line
 
 
-def footer_text() -> str:
-    """The status line to pin at the bottom, reflecting the current state."""
+_PROGRESS = ""                             # what the run is working on right now
+
+
+def set_progress(text: str) -> None:
+    """Report what the run is working on, in the pinned footer.
+
+    The footer is where progress belongs under -q: the scrolling commentary is
+    what a quiet run drops, but a long sync should still show a sign of life.
+    Feeding it unconditionally keeps one mechanism rather than two, so a normal
+    run gets a stable counter under its output at no extra cost.
+
+    Whether there is a footer at all is already recorded by stdout being the
+    wrapper that draws it, so there is no second registry to keep in step.
+    """
+    global _PROGRESS
+    _PROGRESS = text
+    writer = sys.stdout
+    if isinstance(writer, _FooterWriter):
+        writer.set_footer(footer_text())
+
+
+def footer_text(width: int | None = None) -> str:
+    """The status line to pin at the bottom, reflecting the current state.
+
+    Trimmed to the terminal width: the writer redraws the footer by erasing one
+    line, so a footer that wrapped would leave the previous tail on screen.
+    """
     if CANCEL.is_set():
-        return "[quitting...]"
-    if not RESUME.is_set():
-        return "[PAUSED]  keys: [r] resume  [q] quit"
-    return "[running]  keys: [p] pause  [r] resume  [q] quit"
+        state, keys = "[quitting...]", ""
+    elif not RESUME.is_set():
+        state, keys = "[PAUSED]", "keys: [r] resume  [q] quit"
+    else:
+        state, keys = "[running]", "keys: [p] pause  [r] resume  [q] quit"
+    # Progress sits between the two, so trimming eats the keys hint first.
+    text = "  ".join(part for part in (state, _PROGRESS, keys) if part)
+    limit = (shutil.get_terminal_size(fallback=(80, 24)).columns
+             if width is None else width)
+    return text if len(text) <= limit else text[:max(limit - 1, 0)] + "…"
 
 
 def apply_key(ch: str) -> bool:
@@ -140,6 +174,7 @@ class KeyboardControls:
         return self
 
     def __exit__(self, *exc):
+        global _PROGRESS
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=1)
@@ -148,6 +183,7 @@ class KeyboardControls:
             sys.stdout = self._orig_stdout
             termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved)
         self.active = False
+        _PROGRESS = ""       # never linger into the next user's footer
         return False
 
     def _isatty(self) -> bool:

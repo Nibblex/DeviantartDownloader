@@ -1,17 +1,21 @@
 """Inspecting a profile: its facts, stats and galleries, without downloading.
 
 The website 'about' module carries the rich header (birthday, join age, links,
-badges) and the full user stats at no API quota; the API user profile fills in
-what the website omits (bio, real name, human-readable specialty). Either source
-alone still yields a useful summary, so a failure of one degrades gracefully.
+badges), the bio and the full user stats at no API quota, so it answers a whole
+profile on its own; the API user profile is asked only when the website route is
+unavailable, and adds the two fields the website does not publish (the real name
+and a human-readable specialty). Either source alone still yields a useful
+summary, so a failure of one degrades gracefully.
 """
 
-import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
-from .api import DeviantArtClient
-from .constants import WEB_BASE
+from .api import DeviantArtClient, UserNotFoundError
+from .constants import say
 from .listing import fetch_api_folders
+from .literature import KIND_HTML, classify_web_html, render
+from .naming import profile_label
 from .web import WebClient, WebError, web_media_url
 
 # 365.25-day years, matching how DeviantArt counts "Deviant for X years".
@@ -20,21 +24,34 @@ _SECONDS_PER_YEAR = 31_557_600
 
 def gather_profile(client: DeviantArtClient, web: WebClient | None,
                    username: str) -> dict:
-    """Collect a profile's facts, stats and gallery folders into one dict."""
-    info = {"username": username, "profile_url": f"{WEB_BASE}/{username}",
-            "galleries": None}
+    """Collect a profile's facts, stats and gallery folders into one dict.
+
+    The API profile costs one request per user, which --watching --info over a
+    long watchlist multiplies into the rate limit, so it is only asked when the
+    website could not answer: on that route the summary loses the real name and
+    the readable specialty, which the website does not publish. --force-api
+    leaves `web` None and so brings those two back -- at the cost of everything
+    only the website has (badges, birthday, join age, links, watcher counts, and
+    the larger avatar and banner), because it is a swap of source, not a union.
+
+    The bio is not among the losses, despite the API having a field for it: on
+    current profiles that field comes back empty while the website carries the
+    whole text, because the bio moved to the editor the website renders. Adding
+    the API call back would not recover it.
+    """
+    info = {"username": username, "galleries": None}
     if web is not None:
         try:
             info.update(_from_web_about(web.profile_about(username)))
             info["galleries"] = _folders(web.list_folders(username))
         except WebError as e:
             print(f"  Website profile unavailable ({e}); falling back to the API.")
-    # The API fills what the website leaves out (bio, real name, specialty),
-    # and everything when the website route was unavailable.
-    api = client.api_get(f"user/profile/{username}",
-                         params={"mature_content": "true"})
-    _fill_missing(info, _from_api_profile(api))
+    # No folders means the website never answered, which is the one case the
+    # API is worth a request for.
     if info["galleries"] is None:
+        api = client.api_get(f"user/profile/{username}",
+                             params={"mature_content": "true"})
+        _fill_missing(info, _from_api_profile(api))
         info["galleries"] = _folders(
             fetch_api_folders(client, username, calculate_size=True))
     return info
@@ -77,6 +94,7 @@ def _from_web_about(about: dict) -> dict:
         # both of which the API only offers in smaller sizes.
         "avatar": owner.get("usericon"),
         "banner": web_media_url((cover.get("coverDeviation") or {}).get("media") or {}),
+        "bio": _web_bio(a.get("textContent")),
         "country": a.get("country"),
         "website": a.get("website"),
         "website_label": a.get("websiteLabel"),
@@ -102,6 +120,18 @@ def _from_web_about(about: dict) -> dict:
     return out
 
 
+def _web_bio(text_content: object) -> str | None:
+    """The bio the website carries, in whichever editor's format it was written.
+
+    It is the same shape as a literature work's body, so the renderer that
+    module already has turns either format into plain text.
+    """
+    classified = classify_web_html((text_content or {}).get("html"))
+    if classified is None:
+        return None
+    return render(*classified, "txt") or None
+
+
 def _from_api_profile(api: dict) -> dict:
     st = api.get("stats") or {}
     # The banner is a deviation of its own; `cover_photo` is the older field and
@@ -112,12 +142,11 @@ def _from_api_profile(api: dict) -> dict:
         "avatar": (api.get("user") or {}).get("usericon"),
         "banner": banner or api.get("cover_photo") or None,
         "real_name": (api.get("real_name") or "").strip(),
-        "bio": _plain_text(api.get("bio")),
+        "bio": _api_bio(api.get("bio")),
         "tagline": (api.get("tagline") or "").strip(),
         "country": api.get("country"),
         "website": api.get("website"),
         "specialty": api.get("artist_specialty"),
-        "profile_url": api.get("profile_url"),
         "is_artist": api.get("user_is_artist"),
         "stats": {
             "deviations": st.get("user_deviations"),
@@ -150,12 +179,13 @@ def _years(seconds) -> int | None:
     return int(seconds // _SECONDS_PER_YEAR) if seconds else None
 
 
-def _plain_text(html) -> str | None:
-    if not html:
-        return None
-    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.I)
-    text = re.sub(r"<[^>]+>", "", text)
-    return re.sub(r"[ \t]+\n", "\n", text).strip() or None
+def _api_bio(html) -> str | None:
+    """The bio the API carries, which is an HTML fragment of the older editor.
+
+    Rendered by the same code as the website's, so entities are unescaped and
+    block breaks kept rather than run together.
+    """
+    return render(KIND_HTML, html or "", "txt") or None
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +197,7 @@ def _num(value) -> str:
 
 
 def format_profile(info: dict) -> str:
-    head = f"Profile: {info['username']}"
-    if info.get("real_name"):
-        head += f" ({info['real_name']})"
-    lines = [f"{head} — {info['profile_url']}"]
+    lines = [f"Profile: {profile_label(info['username'], info.get('real_name') or '')}"]
 
     if info.get("avatar"):
         lines.append(f"  Avatar: {info['avatar']}")
@@ -238,9 +265,31 @@ def format_profile(info: dict) -> str:
     return "\n".join(lines)
 
 
-def print_profile(client: DeviantArtClient, web: WebClient | None, username: str):
-    """Fetch and print a profile summary; downloads nothing."""
-    print(f"User: {username}")
-    print("Fetching profile info...")
-    print()
-    print(format_profile(gather_profile(client, web, username)))
+def print_profiles(client: DeviantArtClient, web: WebClient | None,
+                   usernames: list[str], *, workers: int = 1,
+                   skip_missing: bool = False) -> None:
+    """Print one summary per user; downloads nothing.
+
+    The profiles are fetched concurrently and printed in the order asked for.
+    A whole watchlist walked one at a time is two website round trips per user
+    of pure latency, and that route costs no quota and is paced by nothing, so
+    there is nothing to gain by going slowly. Each summary is printed as soon
+    as its turn comes, while the ones behind it are still being fetched.
+
+    With skip_missing an account that has gone since it was watched is reported
+    and skipped, the way a batch download treats one; asking for a single
+    profile by name still fails loudly, because a typo should not look empty.
+    """
+    say("Fetching profile info...\n")
+    with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
+        pending = [pool.submit(gather_profile, client, web, name)
+                   for name in usernames]
+        for index, (username, future) in enumerate(zip(usernames, pending)):
+            if index:
+                print()
+            try:
+                print(format_profile(future.result()))
+            except UserNotFoundError as e:
+                if not skip_missing:
+                    raise
+                print(f"  {e}\nSkipping {username}.")

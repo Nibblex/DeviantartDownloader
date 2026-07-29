@@ -12,6 +12,10 @@ REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/callback"
 TOKEN_FILE = Path.home() / ".config" / "deviantart-downloader" / "token.json"
 USER_AGENT = "da-gallery-downloader/1.0"
 PAGE_LIMIT = 24  # maximum allowed by the API
+# Requests per second the API route paces itself to, across every worker.
+# Measured, not guessed; see "Staying under the API rate limit" in the README
+# for the numbers and the reasoning. Tunable with DA_API_RATE (0 disables it).
+API_RATE = 3.0
 
 WEB_BASE = "https://www.deviantart.com"
 GALLECTION_URL = f"{WEB_BASE}/_puppy/dashared/gallection/contents"
@@ -46,6 +50,30 @@ CANCEL = threading.Event()
 # It starts set: downloads run unless the user presses 'p'.
 RESUME = threading.Event()
 RESUME.set()
+
+
+# Cleared by -q/--quiet. Everything that reports progress goes through say()
+# and falls silent; results, warnings, errors and prompts use print() directly
+# and are shown either way, so a quiet run still says what happened and what
+# went wrong. Shared like CANCEL/RESUME because every layer prints.
+VERBOSE = threading.Event()
+VERBOSE.set()
+
+
+def say(*args, **kwargs) -> None:
+    """print() for progress chatter: silent once -q/--quiet has been passed."""
+    if VERBOSE.is_set():
+        print(*args, **kwargs)
+
+
+def sleep_or_cancel(seconds: float) -> None:
+    """Wait out a throttle, but wake immediately on Ctrl+C or 'q'.
+
+    Raises CancelledByUser rather than returning, so no caller can sleep
+    through a cancel and then issue the request anyway.
+    """
+    if CANCEL.wait(max(seconds, 0.0)):
+        raise CancelledByUser("Cancelled by the user")
 
 
 def wait_if_paused() -> None:

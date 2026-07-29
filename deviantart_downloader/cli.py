@@ -8,10 +8,10 @@ from pathlib import Path
 from .api import ApiError, DeviantArtClient
 from .auth import login
 from .config import env_bool, env_choice, env_float, env_int, load_dotenv
-from .constants import CancelledByUser
+from .constants import API_RATE, VERBOSE, CancelledByUser, say
 from .listing import GalleryNotFoundError
-from .naming import extract_username
-from .profile import print_profile
+from .naming import extract_username, profile_label
+from .profile import print_profiles
 from .sync import (add_stats, discover_users, fetch_watching, human_size,
                    new_stats, summary_lines, sync_gallery)
 from .web import WebClient
@@ -45,14 +45,22 @@ def run():
              "output folder is synced with their latest works",
     )
     parser.add_argument("--watching", action="store_true",
-                        help="Download the gallery of every user your account "
-                             "watches, instead of a single profile. Needs the "
-                             "session --login saves")
+                        help="Work on every user your account watches instead of "
+                             "a single profile: download their galleries, or "
+                             "summarise them all with --info. Needs the session "
+                             "--login saves")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        default=env_bool("DA_QUIET", False),
+                        help="Report only results: the per-work and per-page "
+                             "progress lines are dropped, while summaries, "
+                             "warnings, errors and prompts still print "
+                             "(default: DA_QUIET from .env or off)")
     parser.add_argument("-i", "--info", action="store_true",
                         help="Show the profile's info (URLs of the profile, avatar "
                              "and banner, bio, location, birthday, links, statistics, "
                              "galleries and their item counts) and exit without "
-                             "downloading anything. Requires a profile")
+                             "downloading anything. Requires a profile, or "
+                             "--watching to summarise everyone you watch")
     parser.add_argument("-g", "--gallery", metavar="NAME",
                         help="Download only the gallery folder with this name "
                              "(case-insensitive) instead of the whole gallery. "
@@ -67,19 +75,22 @@ def run():
                              "from .env or 'downloads')")
     parser.add_argument("--client-id", default=os.environ.get("DA_CLIENT_ID"))
     parser.add_argument("--client-secret", default=os.environ.get("DA_CLIENT_SECRET"))
-    parser.add_argument("--delay", type=float, default=env_float("DA_DELAY", 0.5),
-                        help="Pause in seconds after each API download, per thread "
-                             "(default: DA_DELAY from .env or 0.5). Website downloads "
-                             "cost no API quota and are never delayed")
     parser.add_argument("-w", "--web-workers", type=int,
                         default=env_int("DA_WEB_WORKERS", env_int("DA_WORKERS", 4)),
                         help="Simultaneous website downloads (default: DA_WEB_WORKERS "
                              "from .env or 4). The website route costs no API quota, so "
                              "this can be high (recommended not to exceed 8)")
     parser.add_argument("--api-workers", type=int, default=env_int("DA_API_WORKERS", 2),
-                        help="Simultaneous API downloads (default: DA_API_WORKERS from "
-                             ".env or 2). Kept low on purpose: the API is rate-limited, "
-                             "so fewer parallel requests avoid 429s")
+                        help="Simultaneous file transfers on the API route "
+                             "(default: DA_API_WORKERS from .env or 2). The request "
+                             "rate is DA_API_RATE's job, shared by every worker, so "
+                             "this is the knob for transfer concurrency, not for 429s")
+    parser.add_argument("--api-rate", type=float, default=env_float("DA_API_RATE", API_RATE),
+                        help="API requests per second, shared by every worker "
+                             f"(default: DA_API_RATE from .env or {API_RATE}). The "
+                             "limit DeviantArt enforces is per account and trips on "
+                             "bursts, so pacing the whole run avoids the 429s that "
+                             "stall it; 0 disables the pacing")
     parser.add_argument("--force-api", action="store_true",
                         default=env_bool("DA_FORCE_API", False),
                         help="Route every work through the API instead of reading "
@@ -112,19 +123,28 @@ def run():
                              "after --login)")
     args = parser.parse_args()
 
+    if args.quiet:
+        VERBOSE.clear()
+
     if args.web_workers < 1:
         sys.exit(f"The number of web workers must be at least 1 (got: {args.web_workers}).")
     if args.api_workers < 1:
         sys.exit(f"The number of API workers must be at least 1 (got: {args.api_workers}).")
 
     if args.watching and args.profile_url:
-        sys.exit("--watching already picks the profiles to download (every user "
+        sys.exit("--watching already picks the profiles to work on (every user "
                  "you watch); drop the profile argument or drop --watching.")
-    if args.gallery and not args.profile_url:
-        sys.exit("--gallery needs a profile: pass the username or URL of the "
-                 "gallery's owner.")
-    if args.info and not args.profile_url:
-        sys.exit("--info needs a profile: pass the username or URL to inspect.")
+    if args.gallery:
+        if args.watching:
+            sys.exit("--gallery does not combine with --watching: folder names "
+                     "differ from one profile to the next, so a single name "
+                     "cannot be asked of everyone you watch. Pass one profile.")
+        if not args.profile_url:
+            sys.exit("--gallery needs a profile: pass the username or URL of the "
+                     "gallery's owner.")
+    if args.info and not (args.profile_url or args.watching):
+        sys.exit("--info needs a profile: pass the username or URL to inspect, "
+                 "or --watching to inspect every user you watch.")
 
     if not args.client_id or not args.client_secret:
         sys.exit(
@@ -134,7 +154,8 @@ def run():
             "  export DA_CLIENT_SECRET='...'"
         )
 
-    client = DeviantArtClient(args.client_id, args.client_secret)
+    client = DeviantArtClient(args.client_id, args.client_secret,
+                              api_rate=args.api_rate)
 
     if args.login:
         login(client)
@@ -142,37 +163,46 @@ def run():
             return  # login-only invocation
 
     output_root = Path(args.output).expanduser()
-    if args.profile_url:
+    # One profile asked for by name fails loudly when it turns out to be gone;
+    # every batch source skips the dead ones and carries on. Both loops below
+    # read this rather than each re-deriving it from a different flag.
+    single = bool(args.profile_url)
+    if single:
         usernames = [extract_username(args.profile_url)]
     elif args.watching:
-        print("Fetching the users your account watches...")
+        say("Fetching the users your account watches...")
         usernames = fetch_watching(client)
-        # Syncing a whole watchlist is a long job, so it is worth seeing the
+        # Either way a whole watchlist is a long job, so it is worth seeing the
         # size of it before it starts. Interrupting later loses no progress.
         print(f"\nYou watch {len(usernames)} user(s).")
-        if not confirm(f"Download all {len(usernames)} galleries "
-                       f"into {output_root}?"):
-            print("Cancelled; nothing was downloaded.")
+        action = (f"Show the profile of all {len(usernames)} of them" if args.info
+                  else f"Download all {len(usernames)} galleries into {output_root}")
+        if not confirm(f"{action}?"):
+            print("Cancelled.")
             return
         print()
     else:
         # No profile: sync every user already downloaded to the output folder
         usernames = discover_users(output_root)
-        print(
+        say(
             f"No profile given: syncing {len(usernames)} previously "
             f"downloaded user(s) in {output_root}: {', '.join(usernames)}\n"
         )
 
     if client.user_mode:
-        print("Using the saved user session (mature works come unblurred if "
-              "your account allows them).")
+        say("Using the saved user session (mature works come unblurred if "
+            "your account allows them).")
 
     web = None if args.force_api else WebClient()
     if web is None:
-        print("API-only mode: every work goes through the API.")
+        say("API-only mode: every work goes through the API.")
 
     if args.info:
-        print_profile(client, web, usernames[0])
+        # A watchlist outlives the accounts on it, so one gone profile must not
+        # take the other summaries down with it.
+        print_profiles(client, web, usernames, skip_missing=not single,
+                       workers=args.web_workers if web is not None
+                       else args.api_workers)
         return
 
     totals = new_stats()
@@ -180,13 +210,13 @@ def run():
     for username in usernames:
         counts = sync_gallery(
             client, username, output_root,
-            delay=args.delay, web_workers=args.web_workers, api_workers=args.api_workers,
+            web_workers=args.web_workers, api_workers=args.api_workers,
             redownload_missing=args.redownload_missing, unblur=args.unblur,
             full=args.full, web=web, gallery=args.gallery,
             text_format=args.literature_format, only=args.only or None,
         )
         if counts is None:
-            if args.profile_url:
+            if single:
                 empty = f'The gallery "{args.gallery}"' if args.gallery else "The gallery"
                 sys.exit(f"{empty} is empty or the user does not exist.")
             print(f"Skipping {username}: the gallery is empty or the user no longer exists.\n")
@@ -201,11 +231,14 @@ def run():
         for line in lines[1:]:
             print(line)
         if per_user:
-            width = max(len(name) for name, _ in per_user)
+            # The URL grows with the name it ends in, so padding the whole label
+            # keeps the counts in one column just as padding the name alone did.
+            rows = sorted(((profile_label(name), counts) for name, counts in per_user),
+                          key=lambda row: row[1]["bytes"], reverse=True)
+            width = max(len(label) for label, _ in rows)
             print("Per user:")
-            for name, counts in sorted(per_user, key=lambda uc: uc[1]["bytes"],
-                                       reverse=True):
-                print(f"  {name:<{width}}  {counts['downloaded']} item(s) "
+            for label, counts in rows:
+                print(f"  {label:<{width}}  {counts['downloaded']} item(s) "
                       f"downloaded, {human_size(counts['bytes'])}")
 
 

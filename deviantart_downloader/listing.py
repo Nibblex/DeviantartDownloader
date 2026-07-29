@@ -1,7 +1,9 @@
 """Walking a gallery listing, over either route, and pairing the two up."""
 
 from .api import DeviantArtClient
-from .constants import CANCEL, PAGE_LIMIT, WEB_PAGE_LIMIT, wait_if_paused
+from .constants import (API_SUBDIR, CANCEL, PAGE_LIMIT, WEB_PAGE_LIMIT,
+                        WEB_SUBDIR, say, wait_if_paused)
+from .controls import set_progress
 from .manifest import DownloadManifest
 from .naming import deviation_key
 from .web import WebClient, WebError, normalize_web_deviation
@@ -101,12 +103,13 @@ def fetch_gallery(
         )
         results = data.get("results", [])
         deviations.extend(results)
-        print(f"  Page at offset {offset}: {len(results)} works (total: {len(deviations)})")
+        say(f"  Page at offset {offset}: {len(results)} works (total: {len(deviations)})")
+        set_progress(f"listing {username}  {API_SUBDIR}  {len(deviations)} works")
         if not data.get("has_more"):
             break
         if page_fully_downloaded(results, manifest, full):
-            print("  Every work on this page was already downloaded; stopping the "
-                  "listing early (pass --full to walk the whole gallery).")
+            say("  Every work on this page was already downloaded; stopping the "
+                "listing early (pass --full to walk the whole gallery).")
             break
         offset = data.get("next_offset") or offset + PAGE_LIMIT
     return deviations
@@ -139,12 +142,13 @@ def fetch_gallery_web(
         data = web.gallery_page(username, offset, WEB_PAGE_LIMIT, folderid=folderid)
         results = [normalize_web_deviation(item) for item in data.get("results", [])]
         deviations.extend(results)
-        print(f"  Page at offset {offset}: {len(results)} works (total: {len(deviations)})")
+        say(f"  Page at offset {offset}: {len(results)} works (total: {len(deviations)})")
+        set_progress(f"listing {username}  {WEB_SUBDIR}  {len(deviations)} works")
         if not data.get("hasMore"):
             break
         if page_fully_downloaded(results, manifest, full):
-            print("  Every work on this page was already downloaded; stopping the "
-                  "listing early (pass --full to walk the whole gallery).")
+            say("  Every work on this page was already downloaded; stopping the "
+                "listing early (pass --full to walk the whole gallery).")
             break
         offset = data.get("nextOffset") or offset + WEB_PAGE_LIMIT
     return deviations
@@ -210,8 +214,8 @@ def resolve_via_api(
                if redownload_missing or not manifest.has(deviation_key(d))]
     if not pending:
         return []
-    print(f"\n{len(pending)} mature work(s) need the API; fetching the pages "
-          "that hold them...")
+    say(f"\n{len(pending)} mature work(s) need the API; fetching the pages "
+        "that hold them...")
     folder = resolve_folder_api(client, username, gallery) if gallery else None
     endpoint = f"gallery/{folder}" if folder else "gallery/all"
 
@@ -229,8 +233,10 @@ def resolve_via_api(
         for r in results:
             index.setdefault(deviation_key(r), r)
         matched = sum(1 for d in pending if deviation_key(d) in index)
-        print(f"  Page at offset {offset}: {len(results)} works "
-              f"({matched}/{len(pending)} matched)")
+        say(f"  Page at offset {offset}: {len(results)} works "
+            f"({matched}/{len(pending)} matched)")
+        set_progress(f"mature lookup {username}  {API_SUBDIR}  "
+                     f"{matched}/{len(pending)} matched")
         return data
 
     def missing() -> list[dict]:
