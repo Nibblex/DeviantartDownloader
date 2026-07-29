@@ -174,20 +174,39 @@ class TestKeyboardControls:
 class TestFooterProgress:
     """Under -q the footer is the only progress a run shows, so it carries it."""
 
+    KEYS = "keys: [p] pause  [r] resume  [q] quit"
+
     def test_progress_sits_between_the_state_and_the_keys(self):
         controls.set_progress("42/900  Crystal ID")
         text = controls.footer_text(width=200)
         assert text.index("[running]") < text.index("42/900") < text.index("keys:")
 
-    def test_no_progress_leaves_the_footer_as_it_was(self):
-        assert controls.footer_text(width=200) == (
-            "[running]  keys: [p] pause  [r] resume  [q] quit")
+    def test_the_keys_end_at_the_same_column_whatever_the_progress_says(self):
+        """The complaint this exists for: work names vary in length, and a hint
+        that slides about with them cannot be read while it moves."""
+        ends = set()
+        for progress in ("", "1/900  api  X", "874/900  web  A very long title here"):
+            controls.set_progress(progress)
+            text = controls.footer_text(width=100)
+            assert text.endswith(self.KEYS)
+            ends.add(len(text))
+        assert ends == {99}          # one column short of the edge, always
 
-    def test_a_narrow_terminal_trims_the_keys_before_the_progress(self):
+    def test_an_overlong_progress_is_cut_and_the_keys_stay_put(self):
+        controls.set_progress("9/900  api  " + "a" * 300)
+        text = controls.footer_text(width=100)
+        assert text.endswith(self.KEYS) and len(text) == 99
+        assert "…" in text           # the progress lost its tail, not the keys
+
+    def test_no_progress_still_reaches_the_right_edge(self):
+        text = controls.footer_text(width=200)
+        assert text.startswith("[running]") and text.endswith(self.KEYS)
+        assert len(text) == 199
+
+    def test_a_terminal_too_narrow_to_split_falls_back_to_one_run(self):
         controls.set_progress("42/900  Crystal ID")
         text = controls.footer_text(width=30)
-        assert len(text) == 30
-        assert "42/900" in text and "resume" not in text
+        assert len(text) == 29 and "42/900" in text and "resume" not in text
 
     def test_progress_survives_a_pause_and_a_quit(self):
         # TestFooterText already pins the state strings; this pins that the
@@ -207,5 +226,4 @@ class TestFooterProgress:
         with controls.KeyboardControls(stream=io.StringIO()):
             pass
         assert controls._PROGRESS == ""      # the next user starts clean
-        assert controls.footer_text(width=200) == (
-            "[running]  keys: [p] pause  [r] resume  [q] quit")
+        assert controls.footer_text(width=200).split()[0] == "[running]"

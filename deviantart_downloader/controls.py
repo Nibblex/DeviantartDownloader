@@ -58,11 +58,25 @@ def set_progress(text: str) -> None:
         writer.set_footer(footer_text())
 
 
+_GAP = 2               # blanks kept between the progress and the keys
+_MIN_PROGRESS = 12     # below this the split is not worth the columns it costs
+
+
+def _trim(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:max(limit - 1, 0)] + "…"
+
+
 def footer_text(width: int | None = None) -> str:
     """The status line to pin at the bottom, reflecting the current state.
 
-    Trimmed to the terminal width: the writer redraws the footer by erasing one
-    line, so a footer that wrapped would leave the previous tail on screen.
+    The keys sit flush against the right edge and the progress grows from the
+    left, so the hint stays where the eye left it instead of sliding about as
+    work names change length. It is the progress that gets trimmed when the two
+    would collide, since that is the part you can afford to read partially.
+
+    The whole line is kept a column short of the edge: writing into the last one
+    makes some terminals wrap, and a wrapped footer outlives the single line the
+    writer erases to redraw it.
     """
     if CANCEL.is_set():
         state, keys = "[quitting...]", ""
@@ -70,11 +84,17 @@ def footer_text(width: int | None = None) -> str:
         state, keys = "[PAUSED]", "keys: [r] resume  [q] quit"
     else:
         state, keys = "[running]", "keys: [p] pause  [r] resume  [q] quit"
-    # Progress sits between the two, so trimming eats the keys hint first.
-    text = "  ".join(part for part in (state, _PROGRESS, keys) if part)
-    limit = (shutil.get_terminal_size(fallback=(80, 24)).columns
-             if width is None else width)
-    return text if len(text) <= limit else text[:max(limit - 1, 0)] + "…"
+    columns = (shutil.get_terminal_size(fallback=(80, 24)).columns
+               if width is None else width)
+    limit = max(columns - 1, 0)
+    left = "  ".join(part for part in (state, _PROGRESS) if part)
+    if not keys:
+        return _trim(left, limit)
+    room = limit - len(keys) - _GAP
+    if room < _MIN_PROGRESS:
+        # Too narrow to hold both apart; run them together and cut the tail.
+        return _trim(f"{left}  {keys}", limit)
+    return _trim(left, room).ljust(room) + " " * _GAP + keys
 
 
 def apply_key(ch: str) -> bool:
