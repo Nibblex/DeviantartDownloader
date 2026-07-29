@@ -192,7 +192,7 @@ def _api_page(client: DeviantArtClient, endpoint: str, username: str,
 def resolve_via_api(
     client: DeviantArtClient, username: str, blocked: list[dict],
     ordered: list[dict] | None = None, *,
-    manifest: DownloadManifest, redownload_missing: bool,
+    manifest: DownloadManifest, redownload: bool,
     gallery: str | None = None,
 ) -> list[dict]:
     """Look up the API entries of the works the website only serves blurred.
@@ -201,7 +201,8 @@ def resolve_via_api(
     works are matched through the gallery listing (the same folder, when a
     gallery name is given). That listing is only walked when at least one
     blocked work still has to be downloaded, which keeps an incremental sync of
-    an all-ages gallery entirely free of API calls.
+    an all-ages gallery entirely free of API calls. `redownload` widens that to
+    every blocked work, for the flags that revisit ones already downloaded.
 
     Both routes list a gallery newest-first in the same order, so each blocked
     work's position in `ordered` (the full website listing) points at the API
@@ -211,7 +212,7 @@ def resolve_via_api(
     as every pending work is found.
     """
     pending = [d for d in blocked
-               if redownload_missing or not manifest.has(deviation_key(d))]
+               if redownload or not manifest.has(deviation_key(d))]
     if not pending:
         return []
     say(f"\n{len(pending)} mature work(s) need the API; fetching the pages "

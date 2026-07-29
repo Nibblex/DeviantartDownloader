@@ -252,10 +252,21 @@ def clean_cli_env(tmp_path, monkeypatch):
     DA_* variables."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "load_dotenv", lambda path=None: None)
+    # user_mode reads a file in the real home directory, so without this a run
+    # would behave differently depending on whether whoever runs the suite
+    # happens to have logged in.
+    monkeypatch.setattr(DeviantArtClient, "user_mode", property(lambda self: False))
     for var in ("DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_WORKERS", "DA_UNBLUR",
                 "DA_OUTPUT", "DA_FORCE_API", "DA_QUIET"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
+
+
+@pytest.fixture
+def logged_in(clean_cli_env, monkeypatch):
+    """A CLI run with the session --login saves; overrides clean_cli_env's default."""
+    monkeypatch.setattr(DeviantArtClient, "user_mode", property(lambda self: True))
+    return clean_cli_env
 
 
 def set_argv(monkeypatch, *args):

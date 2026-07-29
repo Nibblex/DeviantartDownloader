@@ -169,10 +169,22 @@ def fetch_watching(client: DeviantArtClient) -> list[str]:
     return usernames
 
 
+def worth_repairing(output_root: Path, username: str) -> bool:
+    """True when --redownload-blurred could improve anything this user holds.
+
+    It only ever replaces files already on disk, and only the API route ever
+    handed back a blur, so a gallery recorded entirely under web/ cannot be
+    improved and the whole listing walk the flag forces would find nothing.
+    Answered off the download record, before a single request.
+    """
+    out_dir = output_root / username
+    return out_dir.is_dir() and DownloadManifest(out_dir).has_api_route_files()
+
+
 def sync_gallery(
     client: DeviantArtClient, username: str, output_root: Path, *,
     web_workers: int, api_workers: int,
-    redownload_missing: bool, unblur: bool,
+    redownload_missing: bool, unblur: bool, redownload_blurred: bool = False,
     full: bool = False, web: WebClient | None = None, gallery: str | None = None,
     text_format: str = "txt", only: str | None = None,
 ) -> dict | None:
@@ -187,16 +199,17 @@ def sync_gallery(
     lookup, a folder resolution. Deciding what that means is the caller's, who
     is the one that knows whether the profile was asked for by name.
     """
-    print(f"User: {profile_label(username)}")
-    if gallery:
-        print(f'Gallery folder: "{gallery}"')
-    say("Fetching gallery listing...")
     out_dir = output_root / username
     # Loading the manifest before fetching lets the listing stop at the
     # first fully downloaded page. --redownload-missing needs the whole
     # listing: the files it restores are recorded in the manifest, so the
     # early stop would hide them.
     manifest = DownloadManifest(out_dir) if out_dir.is_dir() else None
+
+    print(f"User: {profile_label(username)}")
+    if gallery:
+        print(f'Gallery folder: "{gallery}"')
+    say("Fetching gallery listing...")
     meta_path = out_dir / "_metadata.json"
     previous_meta = read_json(meta_path, [])
     # Manifests written by API-only versions are keyed by UUID, which the
@@ -207,7 +220,10 @@ def sync_gallery(
             say(f"  Re-keyed {migrated} previously downloaded work(s) so both "
                 "routes recognise them.")
 
-    listing_full = full or redownload_missing
+    # Both revisit works already recorded, which the incremental early stop is
+    # built to hide, so either one has to walk the listing whole.
+    revisiting = redownload_missing or redownload_blurred
+    listing_full = full or revisiting
     # The controls cover the whole job, so 'q' stops a long listing too and 'p'
     # pauses it; the listing and routing loops watch CANCEL/RESUME themselves.
     with KeyboardControls():
@@ -243,7 +259,7 @@ def sync_gallery(
             try:
                 blocked = resolve_via_api(client, username, blocked, deviations,
                                           manifest=manifest,
-                                          redownload_missing=redownload_missing,
+                                          redownload=revisiting,
                                           gallery=gallery)
             except CancelledByUser:           # 'q' during a rate-limit wait
                 _quit_before_download()
@@ -283,6 +299,7 @@ def sync_gallery(
                 futures[pool.submit(
                     process_deviation, client, dev, out_dir, manifest,
                     redownload_missing, unblur,
+                    redownload_blurred=redownload_blurred,
                     dest_dir=out_dir / subdir,
                     session=web.session if subdir == WEB_SUBDIR else None,
                     use_api=subdir == API_SUBDIR, web=web,

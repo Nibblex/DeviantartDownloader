@@ -756,6 +756,57 @@ class TestWatchingRun:
         # The prompt reflects what actually happens: no download, no output folder.
         assert asked == ["Show the profile of all 2 of them?"]
 
+    def test_it_combines_with_redownload_blurred(self, clean_cli_env, monkeypatch,
+                                                 galleries, logged_in, capsys):
+        """Replacing blurred copies across a whole watchlist is the likeliest
+        way to need it: nobody logs in before their first mature download."""
+        out = clean_cli_env / "out"
+        asked = []
+        # Both have a mature work on disk, so both are worth walking.
+        for name in ("alice", "bob"):
+            make_user_dir(out, name,
+                          content=json.dumps({"ABCD1234": "api/My Art_abcd1234.png"}))
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice", "bob"])
+        monkeypatch.setattr(cli, "confirm", lambda question: True)
+        galleries["alice"] = galleries["bob"] = [make_dev()]
+        real = sync.process_deviation
+        monkeypatch.setattr(sync, "process_deviation",
+                            lambda *a, **kw: (asked.append(kw.get("redownload_blurred")),
+                                              real(*a, **kw))[1])
+        set_argv(monkeypatch, "--watching", "--redownload-blurred", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+
+        assert asked == [True, True]        # every watched user, not just the first
+        assert "All users synced" in capsys.readouterr().out
+
+    def test_users_with_nothing_blurrable_are_skipped_before_any_request(
+            self, clean_cli_env, monkeypatch, galleries, logged_in, capsys):
+        """A repair pass over a long watchlist should only walk what it can fix."""
+        out = clean_cli_env / "out"
+        make_user_dir(out, "allages",
+                      content=json.dumps({"1111": "web/Ordinary_1111.jpg"}))
+        make_user_dir(out, "mature",
+                      content=json.dumps({"ABCD1234": "api/My Art_abcd1234.png"}))
+        make_user_dir(out, "untouched", content="{}")
+        synced = []
+        monkeypatch.setattr(cli, "sync_gallery",
+                            lambda client, username, *a, **kw:
+                            synced.append(username) or sync.new_stats())
+        monkeypatch.setattr(cli, "fetch_watching",
+                            lambda client: ["allages", "mature", "untouched"])
+        monkeypatch.setattr(cli, "confirm", lambda question: True)
+        set_argv(monkeypatch, "--watching", "--redownload-blurred", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+
+        # The other two never reach the sync, so they cost no request at all and
+        # stay out of the per-user table.
+        assert synced == ["mature"]
+        stdout = capsys.readouterr().out
+        assert "Nothing downloaded through the API for 2 of 3 user(s)" in stdout
+        assert "allages" not in stdout and "untouched" not in stdout
+
     def test_with_a_profile_exits(self, clean_cli_env, monkeypatch):
         set_argv(monkeypatch, "--watching", "someartist", "--client-id", "x",
                  "--client-secret", "y")

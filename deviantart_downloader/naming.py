@@ -103,6 +103,12 @@ def unblur_wixmp_url(url: str) -> str:
 
 # The CDN rejects a blur outside this range, whatever else is right about the URL.
 MAX_WIXMP_BLUR = 100
+_BLUR_RE = re.compile(r",blur_(\d+)")
+
+
+def is_blurred(url: str) -> bool:
+    """True when a URL asks the CDN for the blurred rendering of a work."""
+    return url.startswith("https://images-wixmp-") and bool(_BLUR_RE.search(url))
 
 
 def clamp_wixmp_blur(url: str) -> str:
@@ -117,8 +123,8 @@ def clamp_wixmp_blur(url: str) -> str:
     """
     if not url.startswith("https://images-wixmp-"):
         return url
-    return re.sub(r"blur_(\d+)",
-                  lambda m: f"blur_{min(int(m.group(1)), MAX_WIXMP_BLUR)}", url)
+    return _BLUR_RE.sub(
+        lambda m: f",blur_{min(int(m.group(1)), MAX_WIXMP_BLUR)}", url)
 
 
 def guess_extension(url: str) -> str:

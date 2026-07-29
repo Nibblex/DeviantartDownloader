@@ -31,7 +31,7 @@ class TestListingStopsOnQuit:
         blocked = [make_dev(deviationid="ffffeeee-0000",
                             url="https://www.deviantart.com/a/art/x-222")]
         result = listing.resolve_via_api(client, "artist", blocked,
-                                         manifest=manifest, redownload_missing=True)
+                                         manifest=manifest, redownload=True)
         assert result == []
         assert client.calls == []
 
@@ -226,7 +226,7 @@ class TestResolveViaApi:
         api_entry = make_dev(url=blocked["url"], title="Mature Art")
         client = FakeClient(pages=[{"results": [api_entry], "has_more": False}])
         resolved = listing.resolve_via_api(client, "artist", [blocked], [blocked],
-                                      manifest=manifest, redownload_missing=False)
+                                      manifest=manifest, redownload=False)
         assert resolved == [api_entry]
 
     def test_fetches_only_the_page_holding_the_blocked_work(self, tmp_path):
@@ -240,7 +240,7 @@ class TestResolveViaApi:
                    for i in range(50)] + [blocked]
         client = FakeClient(pages=[{"results": [api_entry], "has_more": True}])
         resolved = listing.resolve_via_api(client, "artist", [blocked], ordered,
-                                      manifest=manifest, redownload_missing=False)
+                                      manifest=manifest, redownload=False)
         assert resolved == [api_entry]
         assert len(client.calls) == 1
         assert client.calls[0][1]["offset"] == 48
@@ -257,7 +257,7 @@ class TestResolveViaApi:
             {"results": [api_entry], "has_more": False},
         ])
         resolved = listing.resolve_via_api(client, "artist", [blocked], [blocked],
-                                      manifest=manifest, redownload_missing=False)
+                                      manifest=manifest, redownload=False)
         assert resolved == [api_entry]
         assert [c[1]["offset"] for c in client.calls] == [0, 24]
 
@@ -267,7 +267,7 @@ class TestResolveViaApi:
         manifest.add(deviation_key(blocked), "api/Mature Art_222222222.jpg")
         client = FakeClient()
         assert listing.resolve_via_api(client, "artist", [blocked], [blocked],
-                                  manifest=manifest, redownload_missing=False) == []
+                                  manifest=manifest, redownload=False) == []
         assert client.calls == []
 
     def test_warns_about_works_the_api_listing_did_not_return(self, tmp_path, capsys):
@@ -275,5 +275,5 @@ class TestResolveViaApi:
         blocked = self.blocked()
         client = FakeClient(pages=[{"results": [], "has_more": False}])
         assert listing.resolve_via_api(client, "artist", [blocked], [blocked],
-                                  manifest=manifest, redownload_missing=False) == []
+                                  manifest=manifest, redownload=False) == []
         assert "were not in the API listing" in capsys.readouterr().out

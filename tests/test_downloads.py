@@ -8,7 +8,8 @@ from deviantart_downloader import downloads
 from deviantart_downloader import web as web_mod
 from deviantart_downloader.constants import CANCEL
 
-from .conftest import DEV_ID, FakeClient, FakeResponse, FakeSession, make_dev
+from .conftest import (BASE_URI, DEV_ID, FakeClient, FakeResponse, FakeSession,
+                       make_dev, recording_download)
 
 
 def _tiptap(text):
@@ -332,3 +333,79 @@ class TestLiteratureDownload:
             FakeClient(), dev, tmp_path, manifest,
             dest_dir=tmp_path / "web", use_api=False, web=FakeWeb({"html": _tiptap("Body")}))
         assert status == "skipped"
+
+
+class TestRedownloadBlurred:
+    """Replace the blurred placeholder a logged-out run settled for."""
+
+    BLURRED = f"{BASE_URI}/v1/fill/w_1080,h_927,q_75,strp,blur_46/x-fullview.jpg?token=t"
+    CLEAN = f"{BASE_URI}?token=t"
+
+    def downloaded(self, tmp_path, manifest, rel, size=100):
+        """A work recorded in the manifest with its file sitting on disk."""
+        dest = tmp_path / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x" * size)
+        manifest.add(DEV_ID, rel)
+        return dest
+
+    def sync(self, tmp_path, manifest, monkeypatch, src, remote=None,
+             subdir="api", **kw):
+        """One work through the route that wrote it, as sync_gallery drives it."""
+        fetched = []
+        monkeypatch.setattr(downloads, "download_file", recording_download(fetched))
+        monkeypatch.setattr(downloads, "remote_size", lambda session, url: remote)
+        status, msg = downloads.process_deviation(
+            FakeClient(), make_dev(content={"src": src}), tmp_path, manifest,
+            use_api=True, dest_dir=tmp_path / subdir, **kw)
+        return status, msg, [url for url, _ in fetched]
+
+    def test_a_blurred_copy_is_replaced_by_the_clean_one(self, tmp_path, manifest,
+                                                        monkeypatch):
+        old = self.downloaded(tmp_path, manifest, "api/My Art_abcd1234.png")
+        status, _, fetched = self.sync(tmp_path, manifest, monkeypatch, self.CLEAN,
+                                       remote=999999, redownload_blurred=True)
+        assert status == "downloaded"
+        assert fetched == [self.CLEAN]
+        # The clean image resolved to .jpg where the blurred copy was .png, so
+        # the old name must go rather than linger holding the blur.
+        assert (tmp_path / "api" / "My Art_abcd1234.jpg").read_bytes() == b"x"
+        assert not old.exists()
+        assert manifest.filename_for(DEV_ID) == "api/My Art_abcd1234.jpg"
+
+    def test_a_copy_that_is_already_clean_is_kept(self, tmp_path, manifest,
+                                                  monkeypatch):
+        """Same size means this one was already fetched unblurred."""
+        self.downloaded(tmp_path, manifest, "api/My Art_abcd1234.png", size=100)
+        status, msg, fetched = self.sync(tmp_path, manifest, monkeypatch, self.CLEAN,
+                                         remote=100, redownload_blurred=True)
+        assert status == "skipped" and "Already unblurred" in msg
+        assert fetched == []
+
+    def test_a_work_still_only_served_blurred_is_kept(self, tmp_path, manifest,
+                                                      monkeypatch):
+        """Without --login the API keeps offering the blur; refetching is moot."""
+        self.downloaded(tmp_path, manifest, "api/My Art_abcd1234.png")
+        status, msg, fetched = self.sync(tmp_path, manifest, monkeypatch, self.BLURRED,
+                                         remote=999999, redownload_blurred=True)
+        assert status == "skipped" and "Still only served blurred" in msg
+        assert fetched == []
+        # Decided off the listing, so no metered request was spent to learn it.
+        assert FakeClient().calls == []
+
+    def test_a_website_route_copy_is_never_touched(self, tmp_path, manifest,
+                                                   monkeypatch):
+        """The website serves what it serves in full, so it never blurred one."""
+        self.downloaded(tmp_path, manifest, "web/My Art_abcd1234.png")
+        status, msg, fetched = self.sync(tmp_path, manifest, monkeypatch, self.CLEAN,
+                                         remote=999999, subdir="web",
+                                         redownload_blurred=True)
+        assert status == "skipped" and "Already exists" in msg
+        assert fetched == []
+
+    def test_an_unknown_remote_size_refetches(self, tmp_path, manifest, monkeypatch):
+        """The CDN would not say; re-fetching is the safe way to be wrong."""
+        self.downloaded(tmp_path, manifest, "api/My Art_abcd1234.png")
+        status, _, fetched = self.sync(tmp_path, manifest, monkeypatch, self.CLEAN,
+                                       remote=None, redownload_blurred=True)
+        assert status == "downloaded" and fetched == [self.CLEAN]

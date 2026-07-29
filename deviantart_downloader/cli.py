@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from .api import ApiError, DeviantArtClient, UserNotFoundError
+from .api import UNREADABLE_PROFILE, ApiError, DeviantArtClient
 from .auth import login
 from .config import env_bool, env_choice, env_float, env_int, load_dotenv
 from .constants import API_RATE, VERBOSE, CancelledByUser, say
@@ -13,7 +13,7 @@ from .listing import GalleryNotFoundError
 from .naming import extract_username, profile_label
 from .profile import print_profiles
 from .sync import (add_stats, discover_users, fetch_watching, human_size,
-                   new_stats, summary_lines, sync_gallery)
+                   new_stats, summary_lines, sync_gallery, worth_repairing)
 from .web import WebClient
 
 
@@ -111,6 +111,16 @@ def run():
                         help="Download only one kind of work (default: both). "
                              "'images' skips literature and journals; 'literature' "
                              "downloads only text works. Also DA_ONLY in .env")
+    parser.add_argument("--redownload-blurred", action="store_true",
+                        help="Fetch again the mature works whose local copy may be "
+                             "the blurred placeholder a logged-out run settled "
+                             "for. Needs --login to do anything: without it the "
+                             "API still only offers the blur, and each work is "
+                             "left alone. Copies already unblurred are recognised "
+                             "by their size and kept, and works still only served "
+                             "blurred cost no request to dismiss. This is a repair "
+                             "pass, not a sync: a user with nothing on the API "
+                             "route is skipped whole")
     parser.add_argument("--redownload-missing", action="store_true",
                         help="Download again works recorded in the manifest whose local "
                              "file is missing (by default, manually deleted files are "
@@ -189,6 +199,24 @@ def run():
             f"downloaded user(s) in {output_root}: {', '.join(usernames)}\n"
         )
 
+    if args.redownload_blurred:
+        if not client.user_mode:
+            sys.exit(
+                "--redownload-blurred needs your DeviantArt account: run --login "
+                "first.\nWithout it the API only ever offers the blur, so every "
+                "work would be left exactly as it is."
+            )
+        wanted = [name for name in usernames if worth_repairing(output_root, name)]
+        skipped = len(usernames) - len(wanted)
+        if skipped:
+            print(f"Nothing downloaded through the API for {skipped} of "
+                  f"{len(usernames)} user(s); they cannot hold a blur and are "
+                  "skipped.")
+        usernames = wanted
+        if not usernames:
+            sys.exit("No blurred copies to replace: nothing here came through "
+                     "the API.")
+
     if client.user_mode:
         say("Using the saved user session (mature works come unblurred if "
             "your account allows them).")
@@ -213,13 +241,15 @@ def run():
                 client, username, output_root,
                 web_workers=args.web_workers, api_workers=args.api_workers,
                 redownload_missing=args.redownload_missing, unblur=args.unblur,
+                redownload_blurred=args.redownload_blurred,
                 full=args.full, web=web, gallery=args.gallery,
                 text_format=args.literature_format, only=args.only or None,
             )
-        except UserNotFoundError as e:
-            # A batch outlives the accounts in it. Whichever call found out the
-            # profile is gone, it ends that user and not the run, and a gone
-            # account has nothing to download -- same outcome as an empty one.
+        except UNREADABLE_PROFILE as e:
+            # A batch outlives the accounts in it. Whichever call found out this
+            # profile cannot be read, it ends that user and not the run, and an
+            # unreadable account has nothing to download -- same outcome as an
+            # empty one.
             print(f"  {e}")
             counts = None
         if counts is None:

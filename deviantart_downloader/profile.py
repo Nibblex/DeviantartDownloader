@@ -11,7 +11,7 @@ summary, so a failure of one degrades gracefully.
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
-from .api import DeviantArtClient, UserNotFoundError
+from .api import UNREADABLE_PROFILE, DeviantArtClient
 from .constants import say
 from .listing import fetch_api_folders
 from .literature import KIND_HTML, classify_web_html, render
@@ -276,9 +276,10 @@ def print_profiles(client: DeviantArtClient, web: WebClient | None,
     there is nothing to gain by going slowly. Each summary is printed as soon
     as its turn comes, while the ones behind it are still being fetched.
 
-    With skip_missing an account that has gone since it was watched is reported
-    and skipped, the way a batch download treats one; asking for a single
-    profile by name still fails loudly, because a typo should not look empty.
+    With skip_missing a profile that cannot be read -- gone, deactivated, or
+    blocked to us -- is reported and skipped, the way a batch download treats
+    one; asking for a single profile by name still fails loudly, because a typo
+    should not look empty.
     """
     say("Fetching profile info...\n")
     with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
@@ -289,7 +290,7 @@ def print_profiles(client: DeviantArtClient, web: WebClient | None,
                 print()
             try:
                 print(format_profile(future.result()))
-            except UserNotFoundError as e:
+            except UNREADABLE_PROFILE as e:
                 if not skip_missing:
                     raise
                 print(f"  {e}\nSkipping {username}.")

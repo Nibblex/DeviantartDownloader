@@ -42,6 +42,16 @@ class DownloadManifest:
                     rel = f.relative_to(out_dir).as_posix()
                     self._entries.setdefault(m.group(1).upper(), rel)
 
+    def has_api_route_files(self) -> bool:
+        """True when anything recorded here was not written by the website route.
+
+        Galleries from before the routes had their own subfolders wrote to the
+        folder root, and those count: their record does not say which route a
+        work took, and assuming the website would be the answer that loses data.
+        """
+        return any(not name.startswith(f"{WEB_SUBDIR}/")
+                   for name in self._entries.values())
+
     def _key(self, dev_id: str) -> str:
         # Numeric website ids are used whole; UUIDs keep the historical
         # 8-character prefix so manifests written by older versions still match.

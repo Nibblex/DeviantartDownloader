@@ -215,3 +215,33 @@ class TestApiGetPacing:
         client.limiter.acquire = lambda: seen.append(1)
         client.api_get("gallery/all")
         assert seen == [1]
+
+
+class TestUnreadableProfiles:
+    """Gone, deactivated and blocked all mean the same to a batch: move on."""
+
+    @pytest.mark.parametrize("description", [
+        'User "ghost" not found.',                          # never existed
+        "Account is inactive.",                             # owner deactivated it
+        "Sorry, we have blocked access to this profile.",   # closed to us
+    ])
+    def test_an_unreadable_profile_is_singled_out(self, tmp_path, description):
+        session = FakeSession(get_responses=[FakeResponse(
+            400, {"error": "invalid_request", "error_description": description})])
+        with pytest.raises(api.UserNotFoundError, match="."):
+            make_client(tmp_path, session).api_get("user/profile/x")
+
+    def test_an_unrelated_400_still_raises_plainly(self, tmp_path):
+        session = FakeSession(get_responses=[FakeResponse(
+            400, {"error": "invalid_request",
+                  "error_description": "Request parameters are invalid."})])
+        with pytest.raises(requests.HTTPError):
+            make_client(tmp_path, session).api_get("user/profile/x")
+
+    def test_a_batch_treats_a_failed_request_as_that_user_ending(self):
+        # Both are about the profile that was asked for...
+        assert issubclass(api.UserNotFoundError, api.UNREADABLE_PROFILE)
+        assert issubclass(requests.HTTPError, api.UNREADABLE_PROFILE)
+        # ...while giving up after every retry is about the account as a whole,
+        # and would only repeat itself on the next user.
+        assert not issubclass(api.ApiError, api.UNREADABLE_PROFILE)

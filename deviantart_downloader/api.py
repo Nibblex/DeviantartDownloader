@@ -21,19 +21,30 @@ class ApiError(RuntimeError):
 
 
 class UserNotFoundError(ApiError):
-    """The profile does not exist or its owner deactivated their account.
+    """This profile cannot be read: gone, deactivated, or blocked to us.
 
-    A deactivated or missing profile answers gallery/all with HTTP 400 rather
-    than an empty listing, so it is singled out from other client errors.
+    Such a profile answers with HTTP 400 rather than an empty listing, so it is
+    singled out from other client errors. The three cases are told apart only by
+    the message, and nothing acts on the difference: whichever it is, this user
+    is over and the run carries on with the next.
     """
 
 
-# Phrases the API puts in error_description when a profile cannot be listed
-# because it is gone: no longer exists, or its owner deactivated the account
-# (e.g. "Account is inactive.", "User \"x\" not found."). Any other 400 (a bad
-# parameter, say) carries a different description and is left to raise normally.
+# Phrases the API puts in error_description when a profile cannot be read: it
+# no longer exists, its owner deactivated the account, or DeviantArt has closed
+# it to us (e.g. "Account is inactive.", "User \"x\" not found.", "Sorry, we
+# have blocked access to this profile."). Any other 400 (a bad parameter, say)
+# carries a different description and is left to raise normally.
 _PROFILE_GONE_MARKERS = ("not found", "inactive", "deactivated", "deleted",
+                         "blocked access",
                          "disabled", "banned", "suspended")
+
+
+# What a batch treats as "this user is over", rather than as the run being over.
+# A failed request says something about the profile it asked for; ApiError says
+# the client gave up after every retry, which is about the account as a whole and
+# would only repeat itself on the next user, ten attempts at a time.
+UNREADABLE_PROFILE = (UserNotFoundError, requests.HTTPError)
 
 
 def _user_not_found(resp: requests.Response) -> str | None:

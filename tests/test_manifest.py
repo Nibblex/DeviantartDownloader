@@ -70,3 +70,26 @@ class TestManifestMigration:
         (tmp_path / "web" / "Web Art_ABCD1234.jpg").write_bytes(b"x")
         manifest = manifest_mod.DownloadManifest(tmp_path)
         assert manifest.filename_for(DEV_ID) == "web/Web Art_ABCD1234.jpg"
+
+
+class TestHasApiRouteFiles:
+    """Only the API route ever hands back a blur, so only it can need repair."""
+
+    def test_an_all_ages_gallery_has_nothing_to_repair(self, tmp_path):
+        (tmp_path / "_downloaded.json").write_text(
+            '{"1": "web/a.jpg", "2": "web/b.jpg"}', encoding="utf-8")
+        assert manifest_mod.DownloadManifest(tmp_path).has_api_route_files() is False
+
+    def test_one_api_entry_is_enough(self, tmp_path):
+        (tmp_path / "_downloaded.json").write_text(
+            '{"1": "web/a.jpg", "2": "api/b.jpg"}', encoding="utf-8")
+        assert manifest_mod.DownloadManifest(tmp_path).has_api_route_files() is True
+
+    def test_a_legacy_flat_gallery_counts(self, tmp_path):
+        # Written before the routes had subfolders, so the route is unknown and
+        # assuming all-ages would silently skip works that do need repair.
+        (tmp_path / "_downloaded.json").write_text('{"1": "a.jpg"}', encoding="utf-8")
+        assert manifest_mod.DownloadManifest(tmp_path).has_api_route_files() is True
+
+    def test_an_empty_gallery_has_nothing(self, tmp_path):
+        assert manifest_mod.DownloadManifest(tmp_path).has_api_route_files() is False

@@ -88,6 +88,7 @@ deviantart-downloader username -w 8           # simultaneous website downloads
 deviantart-downloader username --api-workers 3  # simultaneous API downloads (default: 2)
 deviantart-downloader username --api-rate 2   # API requests per second, all workers (default: 3)
 deviantart-downloader username --redownload-missing  # restore manually deleted files
+deviantart-downloader username --redownload-blurred  # replace copies saved blurred before --login
 deviantart-downloader username --unblur       # strip the blur on mature-content previews
 deviantart-downloader username --literature-format html  # save literature/journals as .html (default: txt)
 deviantart-downloader username --only images       # download only images (skip literature/journals)
@@ -140,6 +141,35 @@ Galleries downloaded by earlier versions keep their existing flat layout; those 
 
 While it is fetching the listing or downloading, and when run in a terminal, you can steer it from the keyboard: **`p`** pauses, **`r`** resumes, and **`q`** quits (like `Ctrl+C`: it stops and cleans up, and re-running resumes where it left off). A status line pinned to the bottom of the terminal shows the available keys and the current state, and the output scrolls above it. When the output is piped or redirected, these controls are simply inactive.
 
+### Replacing copies you saved blurred (`--redownload-blurred`)
+
+Mature works downloaded before you ran `--login` are the blurred placeholder the API serves an anonymous visitor. `--redownload-blurred` fetches those again now that your account can see the real image:
+
+```bash
+deviantart-downloader --login              # once, if you have not already
+deviantart-downloader username --redownload-blurred
+```
+
+Nothing on disk records whether a given file is the blurred one, so the tool works it out from what is on offer now and what you already have:
+
+| Situation | What happens |
+| --- | --- |
+| The API now offers the work unblurred and your copy is a different size | Downloaded again, replacing the blurred one |
+| Your copy already matches the size on offer | Kept — it was already the good one |
+| The work is *still* only offered blurred | Kept — refetching it would change nothing, and it is decided off the listing, so no API request is spent to find out |
+
+So it is safe to re-run: the second pass replaces nothing. It requires `--login` and says so rather than walking every listing to conclude nothing, since without a session the API only ever offers the blur.
+
+**It is a repair pass, not a sync.** Because it can only ever replace files you already have, a user whose download record holds nothing from the API route has no blur to replace — and is skipped whole, before a single request. That is read off `_downloaded.json` locally, so it costs nothing:
+
+```bash
+deviantart-downloader --watching --redownload-blurred
+```
+
+On a 148-user watchlist where 13 had ever downloaded mature content, that walks 13 galleries instead of 148. The other 135 are dismissed in milliseconds. Galleries downloaded by versions old enough to predate the `web/` and `api/` subfolders are always walked, since their record does not say which route a work took and assuming all-ages would skip works that do need repair.
+
+Note that being a repair pass cuts both ways: a skipped user's *new* works are not picked up either. Run it without the flag for that.
+
 When re-syncing a user, the gallery listing (newest first) stops at the first page whose works were all downloaded before, so frequent re-runs stay cheap even on huge galleries. Pass `--full` occasionally to walk the whole listing and pick up older works that became visible later (for example mature content after `--login`); `--redownload-missing` implies it.
 
 ### Sync every downloaded user
@@ -181,11 +211,11 @@ Most options apply per user as usual, so `--watching --only images` or `--watchi
 
 | Option | With `--watching` |
 | --- | --- |
-| `--only`, `--full`, `--redownload-missing`, `--unblur`, `--literature-format`, `--api-rate`, `-q`, `-w`, `--api-workers`, `-o`, `--force-api` | Applied to every watched user |
+| `--only`, `--full`, `--redownload-missing`, `--redownload-blurred`, `--unblur`, `--literature-format`, `--api-rate`, `-q`, `-w`, `--api-workers`, `-o`, `--force-api` | Applied to every watched user |
 | `-i/--info` | Summarises every watched profile instead of downloading |
 | `-g/--gallery` | Rejected: folder names differ from one profile to the next, so one name cannot be asked of everyone you watch |
 
-One of those is worth thinking about before you use it on a long watchlist: `--redownload-missing` implies `--full`, so it walks every listing of every watched user from end to end instead of stopping at the first page already downloaded.
+Two of those are worth thinking about before you use them on a long watchlist. `--redownload-missing` and `--redownload-blurred` both imply `--full`, so they walk every listing of every watched user from end to end instead of stopping at the first page already downloaded — unavoidably, since the works they look for are exactly the ones an incremental sync skips. `--watching --redownload-blurred` is the likeliest way you will want the latter, though: it replaces every blurred copy across everyone you follow in one pass.
 
 `--unblur` is close to pointless here: `--watching` already requires the logged-in session, and with it mature works arrive unblurred anyway (`--unblur` exists for runs without `--login`).
 

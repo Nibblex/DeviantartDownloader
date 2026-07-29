@@ -4,6 +4,7 @@ import json
 import time
 
 import pytest
+import requests
 
 from deviantart_downloader import api, profile
 from deviantart_downloader.web import WebError
@@ -251,6 +252,20 @@ class TestPrintProfiles:
         out = capsys.readouterr().out
         assert 'User "ghost" not found.' in out and "Skipping ghost." in out
         assert "Profile: alice" in out
+
+    def test_a_profile_blocked_to_us_is_skipped_like_a_gone_one(
+            self, monkeypatch, capsys):
+        """DeviantArt closes some profiles; that is not the run's problem."""
+        def gather(client, web, username):
+            if username == "blocked":
+                raise requests.HTTPError("400 Client Error: Bad Request")
+            return {"username": username, "galleries": []}
+
+        monkeypatch.setattr(profile, "gather_profile", gather)
+        profile.print_profiles(None, None, ["blocked", "alice"], workers=2,
+                               skip_missing=True)
+        out = capsys.readouterr().out
+        assert "Skipping blocked." in out and "Profile: alice" in out
 
     def test_a_named_profile_that_is_gone_still_fails_loudly(self, monkeypatch):
         self.fake_gather(monkeypatch, gone={"ghost"})

@@ -6,13 +6,24 @@ import requests
 
 from . import literature
 from .api import DeviantArtClient
-from .constants import CANCEL, wait_if_paused
+from .constants import API_SUBDIR, CANCEL, wait_if_paused
 from .literature import KIND_HTML, KIND_TEXT, classify_web_html, is_text_work
 from .manifest import DownloadManifest
 from .naming import (clamp_wixmp_blur, deviation_key, deviation_suffix,
-                     deviation_title, guess_extension, sanitize_filename,
-                     unblur_wixmp_url, username_from_url)
+                     deviation_title, guess_extension, is_blurred,
+                     sanitize_filename, unblur_wixmp_url, username_from_url)
 from .web import WebClient, WebError
+
+
+def remote_size(session: requests.Session, url: str) -> int | None:
+    """What the CDN says a URL weighs, or None when it will not say."""
+    try:
+        resp = session.head(url, allow_redirects=True, timeout=30)
+        if resp.status_code == 200:
+            return int(resp.headers["Content-Length"])
+    except (requests.RequestException, KeyError, ValueError):
+        pass
+    return None
 
 
 def download_file(
@@ -108,7 +119,8 @@ def _write_text(kind: str, payload: str, text_format: str, title: str, dev: dict
 def process_deviation(
     client: DeviantArtClient, dev: dict, out_dir: Path,
     manifest: DownloadManifest, redownload_missing: bool = False,
-    unblur: bool = False, *, dest_dir: Path | None = None,
+    unblur: bool = False, *, redownload_blurred: bool = False,
+    dest_dir: Path | None = None,
     session: requests.Session | None = None, use_api: bool = True,
     web: WebClient | None = None, text_format: str = "txt",
 ) -> tuple[str, str]:
@@ -132,11 +144,20 @@ def process_deviation(
     # has changed since). Checked before calling the API. The manifest is
     # authoritative: a deleted file is not downloaded again unless
     # --redownload-missing is passed.
+    replacing = None                  # the file --redownload-blurred may replace
     if key and manifest.has(key):
         existing = manifest.filename_for(key)
         if existing and (out_dir / existing).is_file():
-            return "skipped", f"Already exists, skipped: {existing}"
-        if not redownload_missing:
+            # --redownload-blurred replaces the blurred placeholder a logged-out
+            # run settled for. Only the API route ever handed one back, and only
+            # if the API is offering something better now is it worth the bytes.
+            offered = (dev.get("content") or {}).get("src") or ""
+            if not (redownload_blurred and existing.startswith(f"{API_SUBDIR}/")):
+                return "skipped", f"Already exists, skipped: {existing}"
+            if is_blurred(offered):
+                return "skipped", f"Still only served blurred, kept: {existing}"
+            replacing = out_dir / existing
+        elif not redownload_missing:
             return "skipped", f"Deleted locally, skipped: {existing or title}"
         # --redownload-missing: restore the manually deleted file.
 
@@ -182,18 +203,30 @@ def process_deviation(
     if fallback_url:
         fallback_url = clamp_wixmp_blur(fallback_url)
 
+    # The unblurred image is a different file from the blurred placeholder, so a
+    # matching size means this copy is already the good one and the bytes would
+    # be spent for nothing. A size the CDN will not report re-fetches, which is
+    # the safe way to be wrong.
+    if replacing is not None and remote_size(session, file_url) == replacing.stat().st_size:
+        return "skipped", f"Already unblurred, kept: {existing}"
+
     ext = guess_extension(file_url)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"{sanitize_filename(title)}_{deviation_suffix(dev)}{ext}"
     rel = dest.relative_to(out_dir).as_posix()
 
-    if dest.exists():
+    if dest.exists() and replacing is None:
         if key:
             manifest.add(key, rel)
         return "skipped", f"Already exists, skipped: {rel}"
 
     ok = download_file(session, file_url, dest, fallback_url)
     if ok:
+        if replacing is not None and replacing != dest:
+            # The clean image can resolve to a different extension than the
+            # blurred one did; leaving the old file behind would keep the blur
+            # on disk under a name nothing points at any more.
+            replacing.unlink(missing_ok=True)
         if key:
             manifest.add(key, rel)
         return "downloaded", f"Downloaded: {rel}"
