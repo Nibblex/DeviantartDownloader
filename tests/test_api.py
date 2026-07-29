@@ -205,7 +205,7 @@ class TestApiGetPacing:
         ])
         client = make_client(tmp_path, session)
         assert client.api_get("gallery/all") == {"ok": True}
-        assert "holding every worker" in capsys.readouterr().out
+        assert "Rate limit reached" in capsys.readouterr().out
         assert client.limiter._backoff == 0        # reset by the success
 
     def test_every_request_goes_through_the_limiter(self, tmp_path):

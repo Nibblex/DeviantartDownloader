@@ -31,6 +31,7 @@ def _reset_flags():
     RESUME.set()
     VERBOSE.set()
     controls._PROGRESS = ""
+    controls._HOLD_UNTIL, controls._HOLD_HITS = 0.0, 0
 
 
 @pytest.fixture(autouse=True)

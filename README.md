@@ -130,7 +130,14 @@ Progress does not disappear, it moves: in a terminal it goes to the status line 
 [running]  12/900  api  Crystal ID  keys: [p] pause  [r] resume  [q] quit
 ```
 
-It names the route each work took, since the two behave nothing alike: `web` costs no quota and runs at `-w` workers, `api` is metered and paced by `--api-rate`. The line is trimmed to the terminal width, dropping the keys hint first. Piped or redirected, there is no status line and `-q` simply prints less.
+It names the route each work took, since the two behave nothing alike: `web` costs no quota and runs at `-w` workers, `api` is metered and paced by `--api-rate`. The line is trimmed to the terminal width, and a rate-limit wait adds a second line above it that counts down:
+
+```
+[rate limit]  resuming in 28s                                    429s so far: 3
+[running]  12/900  api  Crystal ID                keys: [p] pause  [r] resume  [q] quit
+```
+
+That replaces the line each 429 used to print — several workers, several attempts, per user — with one place that also shows the run is waiting rather than hung. Piped or redirected there is no status line, so a stall announces itself once instead of counting down, and `-q` simply prints less.
 
 Every run ends with a summary broken down by route, size and (when syncing several users) per user:
 

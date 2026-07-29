@@ -10,6 +10,7 @@ import requests
 
 from .constants import (API_BASE, API_RATE, CANCEL, TOKEN_FILE, TOKEN_URL,
                         USER_AGENT, sleep_or_cancel)
+from .controls import clear_hold, set_hold
 
 MAX_ATTEMPTS = 10
 BASE_BACKOFF = 4      # seconds to hold off after the first 429
@@ -225,12 +226,15 @@ class DeviantArtClient:
                 # in case that changes, and the ladder covers its absence.
                 header = resp.headers.get("Retry-After", "")
                 held = self.limiter.penalise(int(header) if header.isdigit() else None)
-                print(f"  Rate limit reached, holding every worker for {held:.0f} s...")
+                # Reported in the footer, which counts it down in one place
+                # instead of a line per worker per attempt.
+                set_hold(held)
                 continue
             if resp.status_code == 400 and (detail := _user_not_found(resp)):
                 raise UserNotFoundError(detail)
             resp.raise_for_status()
             self.limiter.succeeded()
+            clear_hold()
             return resp.json()
         advice = (f" Consider lowering DA_API_RATE (currently "
                   f"{self.limiter.rate:g}/s)." if self.limiter.rate else "")

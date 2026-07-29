@@ -15,6 +15,11 @@ underneath and updated the moment a key is pressed or progress moves. That
 makes the footer the progress channel for -q, which drops the scrolling
 commentary but should still show a sign of life.
 
+A rate-limit wait gets a second line above it, counting down, rather than the
+line per 429 it used to print -- several workers, several attempts, per user
+adds up to hundreds. The countdown ticks from the key-reading loop, since every
+worker is blocked while it runs and nobody else would redraw it.
+
 This needs a real terminal; when stdout is not a TTY (piped, tests, a non-POSIX
 platform) the controls and the footer are inactive and output is unchanged.
 Ctrl+C keeps working either way: cbreak mode leaves the terminal's signals on.
@@ -23,6 +28,7 @@ Ctrl+C keeps working either way: cbreak mode leaves the terminal's signals on.
 import shutil
 import sys
 import threading
+import time
 
 from .constants import CANCEL, RESUME
 
@@ -35,9 +41,48 @@ except ImportError:                       # non-POSIX platform
     _HAS_TERMIOS = False
 
 _CLEAR_LINE = "\r\x1b[2K"                  # carriage return + erase whole line
+_UP = "\x1b[1A"                            # one line up, to reach a block above
 
 
 _PROGRESS = ""                             # what the run is working on right now
+_HOLD_UNTIL = 0.0                          # monotonic deadline of a rate-limit wait
+_HOLD_HITS = 0                             # 429s since the last request got through
+
+
+def set_hold(seconds: float) -> None:
+    """Report that the run is waiting out a 429, on either route.
+
+    This replaces a line per 429, which drowned the output: several workers each
+    hitting the limit, several times, per user. The footer says the same thing in
+    one place and counts down, which also shows the run is waiting rather than
+    hung. Off a terminal there is no footer, so the start of a stall is announced
+    once -- only when hits is 1, so the escalations that follow stay quiet.
+    """
+    global _HOLD_UNTIL, _HOLD_HITS
+    # A stall starts when nothing was being waited out; the 429s that pile on
+    # while it runs extend it rather than beginning another one. Counted here
+    # rather than off the backoff ladder, which an explicit Retry-After never
+    # climbs -- that would leave a stall announcing itself never.
+    starting = hold_seconds() <= 0
+    _HOLD_HITS = 1 if starting else _HOLD_HITS + 1
+    _HOLD_UNTIL = time.monotonic() + seconds
+    if not _redraw() and starting:
+        print(f"  Rate limit reached; holding off. "
+              f"Waiting {seconds:.0f}s, and longer if it persists...")
+
+
+def clear_hold() -> None:
+    """A request got through: the wait is over."""
+    global _HOLD_UNTIL, _HOLD_HITS
+    if not _HOLD_UNTIL:
+        return
+    _HOLD_UNTIL, _HOLD_HITS = 0.0, 0
+    _redraw()
+
+
+def hold_seconds() -> float:
+    """Seconds left on the rate-limit wait, 0 when there is none."""
+    return max(_HOLD_UNTIL - time.monotonic(), 0.0) if _HOLD_UNTIL else 0.0
 
 
 def set_progress(text: str) -> None:
@@ -53,17 +98,56 @@ def set_progress(text: str) -> None:
     """
     global _PROGRESS
     _PROGRESS = text
+    _redraw()
+
+
+_GAP = 2               # blanks kept between the two halves of a line
+_MIN_LEFT = 12         # below this the split is not worth the columns it costs
+
+
+def _redraw() -> bool:
+    """Repaint the pinned block; False when there is no terminal to paint on.
+
+    The one place that decides whether a footer exists and what it holds. Handing
+    the writer lines from anywhere else is how the status line once got painted
+    one character per row: a str is iterable too.
+    """
     writer = sys.stdout
-    if isinstance(writer, _FooterWriter):
-        writer.set_footer(footer_text())
-
-
-_GAP = 2               # blanks kept between the progress and the keys
-_MIN_PROGRESS = 12     # below this the split is not worth the columns it costs
+    if not isinstance(writer, _FooterWriter):
+        return False
+    writer.set_footer(footer_lines())
+    return True
 
 
 def _trim(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:max(limit - 1, 0)] + "…"
+
+
+def _limit(width: int | None) -> int:
+    """Columns a footer line may use.
+
+    One short of the edge: writing into the last one makes some terminals wrap,
+    and a wrapped line outlives the single row the writer erases to redraw it.
+    """
+    columns = (shutil.get_terminal_size(fallback=(80, 24)).columns
+               if width is None else width)
+    return max(columns - 1, 0)
+
+
+def _two_column(left: str, right: str, limit: int) -> str:
+    """`left` growing from the margin, `right` anchored against the far edge.
+
+    The right-hand half is the fixed reference the eye returns to, so it is the
+    left that gives way when the two would collide -- that half you can read
+    partially and still follow. Too narrow to hold them apart and they simply
+    run together, cut at the end.
+    """
+    if not right:
+        return _trim(left, limit)
+    room = limit - len(right) - _GAP
+    if room < _MIN_LEFT:
+        return _trim(f"{left}  {right}", limit)
+    return _trim(left, room).ljust(room) + " " * _GAP + right
 
 
 def footer_text(width: int | None = None) -> str:
@@ -84,17 +168,27 @@ def footer_text(width: int | None = None) -> str:
         state, keys = "[PAUSED]", "keys: [r] resume  [q] quit"
     else:
         state, keys = "[running]", "keys: [p] pause  [r] resume  [q] quit"
-    columns = (shutil.get_terminal_size(fallback=(80, 24)).columns
-               if width is None else width)
-    limit = max(columns - 1, 0)
     left = "  ".join(part for part in (state, _PROGRESS) if part)
-    if not keys:
-        return _trim(left, limit)
-    room = limit - len(keys) - _GAP
-    if room < _MIN_PROGRESS:
-        # Too narrow to hold both apart; run them together and cut the tail.
-        return _trim(f"{left}  {keys}", limit)
-    return _trim(left, room).ljust(room) + " " * _GAP + keys
+    return _two_column(left, keys, _limit(width))
+
+
+def hold_line(width: int | None = None) -> str:
+    """The rate-limit line, laid out like the status line under it."""
+    return _two_column(f"[rate limit]  resuming in {hold_seconds():.0f}s",
+                       f"429s so far: {_HOLD_HITS}", _limit(width))
+
+
+def footer_lines(width: int | None = None) -> list[str]:
+    """The block to pin at the bottom: the status line, and the wait above it.
+
+    The wait gets its own line rather than a corner of the status line, which is
+    already full: the progress fills the middle and the keys are anchored right.
+    It sits above so the keys stay on the last line, where they have been.
+    """
+    lines = [footer_text(width)]
+    if hold_seconds() > 0:
+        lines.insert(0, hold_line(width))
+    return lines
 
 
 def apply_key(ch: str) -> bool:
@@ -120,28 +214,40 @@ def apply_key(ch: str) -> bool:
 
 
 class _FooterWriter:
-    """stdout wrapper that keeps a status line pinned below the output.
+    """stdout wrapper that keeps a status block pinned below the output.
 
-    Each written line clears the footer, prints the line, then redraws the
-    footer on the new last line; set_footer refreshes it in place. A lock keeps
-    the escape sequences intact when worker threads print at the same time.
+    Each written line erases the block, prints the line, then redraws the block
+    underneath; set_footer refreshes it in place. The block is one line most of
+    the time and two while a rate limit is being waited out, so the writer keeps
+    track of how many it drew: erasing the wrong number would leave a stale line
+    on screen or eat one of the program's own. A lock keeps the escape sequences
+    intact when worker threads print at the same time.
     """
 
     def __init__(self, stream):
         self._stream = stream
         self._buffer = ""
-        self._footer = ""
+        self._footer: list[str] = []
         self._lock = threading.RLock()
 
-    def set_footer(self, text: str):
+    def _drawn(self) -> str:
+        return "\n".join(self._footer)
+
+    def _erase(self) -> str:
+        """Sequence that clears the drawn block and leaves the cursor at its top."""
+        return _CLEAR_LINE + (_UP + _CLEAR_LINE) * max(len(self._footer) - 1, 0)
+
+    def set_footer(self, lines: list[str]):
         with self._lock:
-            self._footer = text
-            self._stream.write(_CLEAR_LINE + text)
+            out = self._erase()
+            self._footer = list(lines)
+            self._stream.write(out + self._drawn())
             self._stream.flush()
 
     def clear_footer(self):
         with self._lock:
-            self._stream.write(_CLEAR_LINE)
+            self._stream.write(self._erase())
+            self._footer = []
             self._stream.flush()
 
     def write(self, s: str) -> int:
@@ -149,7 +255,7 @@ class _FooterWriter:
             self._buffer += s
             while "\n" in self._buffer:
                 line, self._buffer = self._buffer.split("\n", 1)
-                self._stream.write(_CLEAR_LINE + line + "\n" + self._footer)
+                self._stream.write(self._erase() + line + "\n" + self._drawn())
             self._stream.flush()
         return len(s)
 
@@ -188,7 +294,7 @@ class KeyboardControls:
         self._orig_stdout = sys.stdout
         self._writer = _FooterWriter(sys.stdout)
         sys.stdout = self._writer
-        self._writer.set_footer(footer_text())
+        _redraw()
         self._thread = threading.Thread(target=self._listen, daemon=True)
         self._thread.start()
         return self
@@ -213,14 +319,22 @@ class KeyboardControls:
             return False
 
     def _refresh(self):
-        if self._writer is not None:
-            self._writer.set_footer(footer_text())
+        _redraw()
 
     def _listen(self):
+        shown = None
         while not self._stop.is_set() and not CANCEL.is_set():
             ready, _, _ = select.select([self.stream], [], [], 0.2)
             if not ready:
+                # Nobody redraws the footer while every worker is blocked on a
+                # rate-limit wait, so the countdown ticks from here -- once per
+                # second it changes by, not once per poll.
+                left = round(hold_seconds())
+                if left != shown and (left or shown):
+                    shown = left
+                    self._refresh()
                 continue
+            shown = None
             ch = self.stream.read(1)
             if not ch:
                 continue

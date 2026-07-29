@@ -13,6 +13,7 @@ from .constants import (BROWSER_USER_AGENT, DEVIATION_INIT_URL,
                         GALLECTION_FOLDERS_URL, GALLECTION_URL,
                         PROFILE_ABOUT_URL, WEB_BASE, WEB_PAGE_LIMIT, WEB_SUBDIR,
                         sleep_or_cancel)
+from .controls import set_hold
 
 
 class WebError(RuntimeError):
@@ -66,8 +67,10 @@ class WebClient:
                     self._csrf = None
                 continue
             if resp.status_code == 429:
+                # Same 429, same report: the footer counts it down in one place
+                # rather than a line per attempt per worker.
                 wait = 5 * (attempt + 1)
-                print(f"  Website throttling the listing, waiting {wait} s...")
+                set_hold(wait)
                 sleep_or_cancel(wait)
                 continue
             if resp.status_code != 200:

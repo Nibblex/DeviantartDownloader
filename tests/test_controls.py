@@ -94,7 +94,7 @@ class TestFooterWriter:
     def test_pins_footer_below_each_line(self):
         buf = io.StringIO()
         w = controls._FooterWriter(buf)
-        w.set_footer("FOOT")
+        w.set_footer(["FOOT"])
         w.write("hello\n")
         w.write("world\n")
         out = buf.getvalue()
@@ -137,6 +137,113 @@ class FakeTTY:
 
     def fileno(self):
         return -1
+
+
+class TestRateLimitHold:
+    """A 429 used to print a line per worker per attempt; now it is one place."""
+
+    def test_no_hold_leaves_the_footer_at_one_line(self):
+        assert len(controls.footer_lines(width=96)) == 1
+
+    def test_a_hold_adds_a_line_above_the_status(self):
+        controls.set_progress("12/900  api  X")
+        controls.set_hold(28)
+        lines = controls.footer_lines(width=96)
+        assert len(lines) == 2
+        assert lines[0].startswith("[rate limit]")
+        # The keys stay on the last line, where the eye already looks for them.
+        assert lines[1].endswith("[q] quit")
+
+    def test_it_counts_down(self, monkeypatch):
+        clock = [1000.0]
+        monkeypatch.setattr(controls.time, "monotonic", lambda: clock[0])
+        controls.set_hold(30)
+        assert "resuming in 30s" in controls.hold_line(width=96)
+        clock[0] += 22
+        assert "resuming in 8s" in controls.hold_line(width=96)
+        clock[0] += 10
+        assert controls.footer_lines(width=96) == [controls.footer_text(96)]
+
+    def test_the_429s_of_one_stall_are_counted_together(self):
+        controls.set_hold(30)                    # first worker to notice
+        for _ in range(4):
+            controls.set_hold(28)                # the rest pile onto the same wait
+        assert "429s so far: 5" in controls.hold_line(width=96)
+
+    def test_a_request_getting_through_ends_it(self):
+        controls.set_hold(30)
+        controls.clear_hold()
+        assert controls.hold_seconds() == 0
+        assert len(controls.footer_lines(width=96)) == 1
+
+    def test_off_a_terminal_a_stall_announces_itself_once(self, capsys):
+        for seconds in (4, 8, 16, 32):           # the ladder, as one stall
+            controls.set_hold(seconds)
+        out = capsys.readouterr().out
+        assert out.count("Rate limit reached") == 1
+        assert "Waiting 4s" in out
+
+
+class TestRedrawSeam:
+    """One place decides whether there is a footer and what goes in it."""
+
+    def test_it_reports_when_there_is_nothing_to_paint(self):
+        assert controls._redraw() is False        # stdout is not the wrapper here
+
+    def test_the_first_paint_is_one_line_not_one_per_character(self, monkeypatch):
+        """A str is iterable, so handing the writer raw text painted it vertically."""
+        buf = io.StringIO()
+        writer = controls._FooterWriter(buf)
+        monkeypatch.setattr(controls.sys, "stdout", writer)
+        assert controls._redraw() is True
+        assert len(writer._footer) == 1
+        assert "\x1b[1A" not in buf.getvalue()
+
+
+class TestFooterBlockRedraw:
+    """The block is one line or two, so the writer must erase what it drew."""
+
+    def lines_of(self, out):
+        return out.count("\x1b[2K")
+
+    def test_growing_to_two_lines_erases_the_one_that_was_there(self):
+        buf = io.StringIO()
+        w = controls._FooterWriter(buf)
+        w.set_footer(["ONE"])
+        buf.seek(0); buf.truncate()
+        w.set_footer(["HOLD", "ONE"])
+        out = buf.getvalue()
+        assert out.startswith("\r\x1b[2K")          # one line erased, not two
+        assert "\x1b[1A" not in out
+        assert out.endswith("HOLD\nONE")
+
+    def test_shrinking_back_erases_both(self):
+        buf = io.StringIO()
+        w = controls._FooterWriter(buf)
+        w.set_footer(["HOLD", "ONE"])
+        buf.seek(0); buf.truncate()
+        w.set_footer(["ONE"])
+        out = buf.getvalue()
+        assert out.count("\x1b[1A") == 1           # walked up over the extra line
+        assert out.endswith("ONE")
+
+    def test_a_printed_line_scrolls_above_a_two_line_block(self):
+        buf = io.StringIO()
+        w = controls._FooterWriter(buf)
+        w.set_footer(["HOLD", "ONE"])
+        buf.seek(0); buf.truncate()
+        w.write("done\n")
+        out = buf.getvalue()
+        assert out.count("\x1b[1A") == 1           # both footer lines cleared
+        assert "done\n" in out and out.endswith("HOLD\nONE")
+
+    def test_clearing_walks_up_the_whole_block(self):
+        buf = io.StringIO()
+        w = controls._FooterWriter(buf)
+        w.set_footer(["HOLD", "ONE"])
+        buf.seek(0); buf.truncate()
+        w.clear_footer()
+        assert buf.getvalue().count("\x1b[1A") == 1
 
 
 class TestKeyboardControls:
