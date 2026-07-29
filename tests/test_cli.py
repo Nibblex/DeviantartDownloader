@@ -225,7 +225,7 @@ class TestRun:
         assert (gallery / "web" / "Web Art_1004952679.jpg").is_file()
         assert not list((gallery / "web").glob("*.txt"))
         stdout = capsys.readouterr().out
-        assert "skipped 1 literature/journals" in stdout
+        assert "--only images): skipped 1 of 2 work(s)" in stdout
 
     def test_only_literature_skips_images(self, clean_cli_env, monkeypatch, capsys):
         img = web_item()
@@ -246,7 +246,7 @@ class TestRun:
         gallery = out / "artist"
         assert (gallery / "web" / "My Poem_1260299235.txt").is_file()
         assert not list((gallery / "web").glob("*.jpg"))
-        assert "skipped 1 images" in capsys.readouterr().out
+        assert "--only literature): skipped 1 of 2 work(s)" in capsys.readouterr().out
 
     def test_only_with_no_matches_is_not_fatal(self, clean_cli_env, monkeypatch, capsys):
         web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}])

@@ -16,7 +16,7 @@ from .naming import deviation_key, deviation_title, profile_label
 from .storage import read_json, write_json
 from .web import WebClient, needs_api
 
-STATUSES = ("downloaded", "skipped", "failed", "no_media", "cancelled")
+STATUSES = ("downloaded", "replaced", "skipped", "failed", "no_media", "cancelled")
 
 # The friends endpoint caps its page size lower than the gallery listing does.
 WATCH_PAGE_LIMIT = 50
@@ -29,16 +29,47 @@ def _quit_before_download() -> None:
     sys.exit(130)
 
 
-def filter_by_content(deviations: list[dict], only: str | None) -> tuple[list[dict], int]:
-    """Keep only images or only literature, per `only`. Returns (kept, dropped).
+ONLY_FILTERS = ("images", "literature", "mature")
+_KINDS = frozenset(("images", "literature"))
 
-    With `only` None nothing is filtered. "images" keeps works with a media
-    file (drops literature/journals); "literature" keeps text works only.
+
+def parse_only(values) -> frozenset[str]:
+    """The --only selectors, given as repeated words, commas, or both."""
+    chosen = frozenset(
+        token for value in values or ()
+        for token in str(value).lower().replace(",", " ").split() if token)
+    unknown = sorted(chosen - frozenset(ONLY_FILTERS))
+    if unknown:
+        # --only reads every word after it, so a profile written behind it is
+        # swallowed as a selector; say so rather than leave it to be guessed.
+        sys.exit(f"--only takes {', '.join(ONLY_FILTERS)}, not: {', '.join(unknown)}\n"
+                 "If that is the profile, put it before --only, which reads "
+                 "every word that follows it.")
+    return chosen
+
+
+def filter_by_content(deviations: list[dict],
+                      only: frozenset[str] | None) -> tuple[list[dict], int]:
+    """Keep the works matching everything `only` asks for. Returns (kept, dropped).
+
+    The selectors sit on two axes, so they combine the way filters usually do:
+    a union within an axis, an intersection across them. "images" and
+    "literature" are the two values of what kind of work it is, so naming both
+    is the same as naming neither; "mature" is a separate axis and narrows
+    whatever the kind left, which is what makes `--only literature mature` mean
+    the mature literature rather than everything that is either.
     """
-    if only not in ("images", "literature"):
+    if not only:
         return deviations, 0
-    want_text = only == "literature"
-    kept = [d for d in deviations if is_text_work(d) == want_text]
+    # A bare string would iterate as characters and quietly filter nothing.
+    only = frozenset([only]) if isinstance(only, str) else frozenset(only)
+    kept = deviations
+    kinds = only & _KINDS
+    if len(kinds) == 1:
+        want_text = "literature" in kinds
+        kept = [d for d in kept if is_text_work(d) == want_text]
+    if "mature" in only:
+        kept = [d for d in kept if d.get("is_mature")]
     return kept, len(deviations) - len(kept)
 
 
@@ -87,10 +118,15 @@ def summary_lines(stats: dict, *, users: int | None = None) -> list[str]:
         f"| Skipped (already existed): {stats['skipped']} "
         f"| No file: {stats['no_media']} | Failed: {stats['failed']}"
     ]
+    if stats["replaced"]:
+        lines[0] += f" | Replaced (were blurred): {stats['replaced']}"
     if stats["cancelled"]:
         lines[0] += f" | Cancelled: {stats['cancelled']}"
 
-    if stats["downloaded"]:
+    # A repair pass can replace plenty while downloading nothing new, so the
+    # breakdown counts both kinds of write.
+    written = stats["downloaded"] + stats["replaced"]
+    if written:
         web, api = stats[WEB_SUBDIR], stats[API_SUBDIR]
         lines.append(
             f"  · via website: {web['downloaded']} item(s), "
@@ -104,7 +140,7 @@ def summary_lines(stats: dict, *, users: int | None = None) -> list[str]:
         elapsed = stats["elapsed"]
         if elapsed >= 0.05:
             total += f" in {elapsed:.1f}s ({human_size(stats['bytes'] / elapsed)}/s)"
-        total += f", avg {human_size(stats['bytes'] / stats['downloaded'])}/file"
+        total += f", avg {human_size(stats['bytes'] / written)}/file"
         if users:
             total += f", across {users} user(s)"
         lines.append(total)
@@ -186,7 +222,7 @@ def sync_gallery(
     web_workers: int, api_workers: int,
     redownload_missing: bool, unblur: bool, redownload_blurred: bool = False,
     full: bool = False, web: WebClient | None = None, gallery: str | None = None,
-    text_format: str = "txt", only: str | None = None,
+    text_format: str = "txt", only: frozenset[str] | None = None,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
     or None when the gallery is empty.
@@ -240,10 +276,10 @@ def sync_gallery(
             return None
         deviations, dropped = filter_by_content(deviations, only)
         if dropped:
-            other = "literature/journals" if only == "images" else "images"
-            say(f"  Content filter (--only {only}): skipped {dropped} {other}.")
+            say(f"  Content filter (--only {' '.join(sorted(only))}): skipped "
+                f"{dropped} of {dropped + len(deviations)} work(s).")
         if not deviations:
-            print(f"No {only} to download in this gallery.")
+            print(f"No {' '.join(sorted(only))} to download in this gallery.")
             return new_stats()
         say(f"\nTotal works found: {len(deviations)}\n")
 
@@ -313,7 +349,7 @@ def sync_gallery(
                     except Exception as e:
                         status, message = "failed", f"Unexpected ERROR: {e}"
                     counts[status] += 1
-                    if status == "downloaded":
+                    if status in ("downloaded", "replaced"):
                         # The file's size comes off disk: the manifest records
                         # the path this route wrote it to, keyed by the work's id.
                         rel = manifest.filename_for(deviation_key(dev))

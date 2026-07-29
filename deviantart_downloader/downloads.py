@@ -222,11 +222,18 @@ def process_deviation(
 
     ok = download_file(session, file_url, dest, fallback_url)
     if ok:
-        if replacing is not None and replacing != dest:
-            # The clean image can resolve to a different extension than the
-            # blurred one did; leaving the old file behind would keep the blur
-            # on disk under a name nothing points at any more.
-            replacing.unlink(missing_ok=True)
+        if replacing is not None:
+            # Counted apart from an ordinary download: after a repair pass the
+            # number worth knowing is how many blurred copies actually changed,
+            # which "Downloaded" alone would bury among works that were simply new.
+            if replacing != dest:
+                # The clean image can resolve to a different extension than
+                # the blurred one did; leaving the old file behind would keep
+                # the blur on disk under a name nothing points at any more.
+                replacing.unlink(missing_ok=True)
+            if key:
+                manifest.add(key, rel)
+            return "replaced", f"Replaced blurred copy: {rel}"
         if key:
             manifest.add(key, rel)
         return "downloaded", f"Downloaded: {rel}"

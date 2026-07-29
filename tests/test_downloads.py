@@ -363,9 +363,11 @@ class TestRedownloadBlurred:
     def test_a_blurred_copy_is_replaced_by_the_clean_one(self, tmp_path, manifest,
                                                         monkeypatch):
         old = self.downloaded(tmp_path, manifest, "api/My Art_abcd1234.png")
-        status, _, fetched = self.sync(tmp_path, manifest, monkeypatch, self.CLEAN,
-                                       remote=999999, redownload_blurred=True)
-        assert status == "downloaded"
+        status, msg, fetched = self.sync(tmp_path, manifest, monkeypatch, self.CLEAN,
+                                         remote=999999, redownload_blurred=True)
+        # Counted apart from a plain download so the run can report how many
+        # blurred copies actually changed.
+        assert status == "replaced" and "Replaced blurred copy" in msg
         assert fetched == [self.CLEAN]
         # The clean image resolved to .jpg where the blurred copy was .png, so
         # the old name must go rather than linger holding the blur.
@@ -408,4 +410,4 @@ class TestRedownloadBlurred:
         self.downloaded(tmp_path, manifest, "api/My Art_abcd1234.png")
         status, _, fetched = self.sync(tmp_path, manifest, monkeypatch, self.CLEAN,
                                        remote=None, redownload_blurred=True)
-        assert status == "downloaded" and fetched == [self.CLEAN]
+        assert status == "replaced" and fetched == [self.CLEAN]

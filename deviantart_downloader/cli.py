@@ -12,8 +12,9 @@ from .constants import API_RATE, VERBOSE, CancelledByUser, say
 from .listing import GalleryNotFoundError
 from .naming import extract_username, profile_label
 from .profile import print_profiles
-from .sync import (add_stats, discover_users, fetch_watching, human_size,
-                   new_stats, summary_lines, sync_gallery, worth_repairing)
+from .sync import (ONLY_FILTERS, add_stats, discover_users, fetch_watching,
+                   human_size, new_stats, parse_only, summary_lines,
+                   sync_gallery, worth_repairing)
 from .web import WebClient
 
 
@@ -106,11 +107,14 @@ def run():
                              "media file (default: DA_LITERATURE_FORMAT from .env or "
                              "'txt'). 'txt' saves the plain text; 'html' saves a "
                              "standalone HTML document that keeps the formatting")
-    parser.add_argument("--only", choices=["images", "literature"],
-                        default=env_choice("DA_ONLY", "", ("images", "literature")),
-                        help="Download only one kind of work (default: both). "
-                             "'images' skips literature and journals; 'literature' "
-                             "downloads only text works. Also DA_ONLY in .env")
+    parser.add_argument("--only", nargs="+", metavar="WHAT",
+                        default=[os.environ.get("DA_ONLY", "")],
+                        help=f"Keep only the works matching all of {', '.join(ONLY_FILTERS)} "
+                             "(default: everything). Repeat or comma-separate them: "
+                             "'images' and 'literature' are the two kinds of work, so "
+                             "naming both is the same as naming neither, while 'mature' "
+                             "narrows whatever the kind left -- '--only literature mature' "
+                             "is the mature literature. Also DA_ONLY in .env")
     parser.add_argument("--redownload-blurred", action="store_true",
                         help="Fetch again the mature works whose local copy may be "
                              "the blurred placeholder a logged-out run settled "
@@ -135,6 +139,8 @@ def run():
 
     if args.quiet:
         VERBOSE.clear()
+
+    only = parse_only(args.only)
 
     if args.web_workers < 1:
         sys.exit(f"The number of web workers must be at least 1 (got: {args.web_workers}).")
@@ -243,7 +249,7 @@ def run():
                 redownload_missing=args.redownload_missing, unblur=args.unblur,
                 redownload_blurred=args.redownload_blurred,
                 full=args.full, web=web, gallery=args.gallery,
-                text_format=args.literature_format, only=args.only or None,
+                text_format=args.literature_format, only=only,
             )
         except UNREADABLE_PROFILE as e:
             # A batch outlives the accounts in it. Whichever call found out this
