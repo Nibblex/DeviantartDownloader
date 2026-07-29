@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .api import DeviantArtClient, UserNotFoundError
+from .api import DeviantArtClient
 from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR, CancelledByUser, say
 from .controls import KeyboardControls, set_progress
 from .downloads import process_deviation
@@ -177,10 +177,15 @@ def sync_gallery(
     text_format: str = "txt", only: str | None = None,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
-    or None when the gallery is empty / the user does not exist.
+    or None when the gallery is empty.
 
     With a gallery name only that folder is downloaded instead of the whole
     gallery. Exits with code 130 if the user interrupts with Ctrl+C.
+
+    A profile that has gone since it was listed raises UserNotFoundError, from
+    whichever call happens to discover it -- the gallery listing, the mature
+    lookup, a folder resolution. Deciding what that means is the caller's, who
+    is the one that knows whether the profile was asked for by name.
     """
     print(f"User: {profile_label(username)}")
     if gallery:
@@ -211,11 +216,6 @@ def sync_gallery(
             deviations, from_web = list_gallery(client, web, username,
                                                 manifest=manifest, full=listing_full,
                                                 gallery=gallery)
-        except UserNotFoundError as e:
-            # Deactivated or non-existent profile; treat it like an empty gallery
-            # so the caller reports it and, when syncing many users, moves on.
-            print(f"  {e}")
-            return None
         except CancelledByUser:               # 'q' during a rate-limit wait
             _quit_before_download()
         if CANCEL.is_set():                   # 'q' between listing pages

@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-from .api import ApiError, DeviantArtClient
+from .api import ApiError, DeviantArtClient, UserNotFoundError
 from .auth import login
 from .config import env_bool, env_choice, env_float, env_int, load_dotenv
 from .constants import API_RATE, VERBOSE, CancelledByUser, say
@@ -208,13 +208,20 @@ def run():
     totals = new_stats()
     per_user = []
     for username in usernames:
-        counts = sync_gallery(
-            client, username, output_root,
-            web_workers=args.web_workers, api_workers=args.api_workers,
-            redownload_missing=args.redownload_missing, unblur=args.unblur,
-            full=args.full, web=web, gallery=args.gallery,
-            text_format=args.literature_format, only=args.only or None,
-        )
+        try:
+            counts = sync_gallery(
+                client, username, output_root,
+                web_workers=args.web_workers, api_workers=args.api_workers,
+                redownload_missing=args.redownload_missing, unblur=args.unblur,
+                full=args.full, web=web, gallery=args.gallery,
+                text_format=args.literature_format, only=args.only or None,
+            )
+        except UserNotFoundError as e:
+            # A batch outlives the accounts in it. Whichever call found out the
+            # profile is gone, it ends that user and not the run, and a gone
+            # account has nothing to download -- same outcome as an empty one.
+            print(f"  {e}")
+            counts = None
         if counts is None:
             if single:
                 empty = f'The gallery "{args.gallery}"' if args.gallery else "The gallery"

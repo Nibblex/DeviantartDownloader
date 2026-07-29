@@ -9,9 +9,9 @@ from .api import DeviantArtClient
 from .constants import CANCEL, wait_if_paused
 from .literature import KIND_HTML, KIND_TEXT, classify_web_html, is_text_work
 from .manifest import DownloadManifest
-from .naming import (deviation_key, deviation_suffix, deviation_title,
-                     guess_extension,
-                     sanitize_filename, unblur_wixmp_url, username_from_url)
+from .naming import (clamp_wixmp_blur, deviation_key, deviation_suffix,
+                     deviation_title, guess_extension, sanitize_filename,
+                     unblur_wixmp_url, username_from_url)
 from .web import WebClient, WebError
 
 
@@ -176,6 +176,11 @@ def process_deviation(
                 return _write_text(kind, payload, text_format, title, dev, out_dir,
                                    dest_dir, manifest, key)
         return "no_media", f"NO FILE (no text or media): {title}"
+
+    # Whichever route produced it, the URL may carry a blur the CDN refuses.
+    file_url = clamp_wixmp_blur(file_url)
+    if fallback_url:
+        fallback_url = clamp_wixmp_blur(fallback_url)
 
     ext = guess_extension(file_url)
     dest_dir.mkdir(parents=True, exist_ok=True)

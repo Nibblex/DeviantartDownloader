@@ -101,6 +101,26 @@ def unblur_wixmp_url(url: str) -> str:
     return url
 
 
+# The CDN rejects a blur outside this range, whatever else is right about the URL.
+MAX_WIXMP_BLUR = 100
+
+
+def clamp_wixmp_blur(url: str) -> str:
+    """Bring an out-of-range blur transform back to what the CDN accepts.
+
+    DeviantArt serves some works through a blur beyond its own CDN's 0-100
+    range (blur_171 seen in the wild), and those answer 400 "(blur) parameter
+    has to be between 0 and 100" on both routes, so the work cannot be fetched
+    at all. The signed token bounds the blur from below (blur >= 30) and never
+    from above, so lowering it to the maximum keeps the URL authorized while
+    making it valid, and the image comes back at full resolution.
+    """
+    if not url.startswith("https://images-wixmp-"):
+        return url
+    return re.sub(r"blur_(\d+)",
+                  lambda m: f"blur_{min(int(m.group(1)), MAX_WIXMP_BLUR)}", url)
+
+
 def guess_extension(url: str) -> str:
     path = unquote(urlparse(url).path)
     ext = os.path.splitext(path)[1].lower()

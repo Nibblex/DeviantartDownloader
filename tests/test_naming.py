@@ -89,3 +89,28 @@ class TestDeviationKey:
 
     def test_unidentifiable_work_has_no_key(self):
         assert naming.deviation_key({"title": "x"}) == ""
+
+
+class TestClampWixmpBlur:
+    """DeviantArt serves blurs its own CDN refuses; they answer 400 either way."""
+
+    WIXMP = "https://images-wixmp-abc.wixmp.com/f/uuid/file.jpg"
+
+    def test_an_out_of_range_blur_is_brought_down_to_the_maximum(self):
+        url = f"{self.WIXMP}/v1/fill/w_4000,h_3000,q_75,strp,blur_171/x.jpg?token=t"
+        assert naming.clamp_wixmp_blur(url) == url.replace("blur_171", "blur_100")
+
+    def test_a_blur_the_cdn_accepts_is_left_alone(self):
+        # The token bounds the blur from below, so lowering a valid one could
+        # push it under what the signature allows.
+        for blur in (0, 30, 44, 100):
+            url = f"{self.WIXMP}/v1/fill/w_100,h_100,blur_{blur}/x.jpg?token=t"
+            assert naming.clamp_wixmp_blur(url) == url
+
+    def test_a_url_without_a_blur_is_untouched(self):
+        url = f"{self.WIXMP}?token=t"
+        assert naming.clamp_wixmp_blur(url) == url
+
+    def test_only_wixmp_urls_are_rewritten(self):
+        url = "https://example.com/v1/fill/blur_171/x.jpg"
+        assert naming.clamp_wixmp_blur(url) == url

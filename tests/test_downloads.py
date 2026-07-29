@@ -73,6 +73,39 @@ class TestDownloadFile:
 
 
 class TestProcessDeviation:
+    def test_an_impossible_blur_is_clamped_before_the_request(self, tmp_path,
+                                                              manifest, monkeypatch):
+        """blur_171 answers 400 on both routes; blur_100 is what can be fetched."""
+        blurred = ("https://images-wixmp-abc.wixmp.com/f/uuid/file.jpg"
+                   "/v1/fill/w_4000,h_3000,q_75,strp,blur_171/x-fullview.jpg?token=t")
+        fetched = []
+        monkeypatch.setattr(downloads, "download_file",
+                            lambda session, url, dest, fallback=None:
+                            (fetched.append((url, fallback)),
+                             dest.write_bytes(b"x"), True)[2])
+        status, _ = downloads.process_deviation(
+            FakeClient(), make_dev(content={"src": blurred}), tmp_path, manifest)
+        assert status == "downloaded"
+        assert "blur_100" in fetched[0][0] and "blur_171" not in fetched[0][0]
+
+    def test_the_unblur_fallback_is_clamped_too(self, tmp_path, manifest,
+                                                monkeypatch):
+        """--unblur strips the blur, the CDN 403s, and the fallback must work."""
+        blurred = ("https://images-wixmp-abc.wixmp.com/f/uuid/file.jpg"
+                   "/v1/fill/w_4000,h_3000,strp,blur_171/x-fullview.jpg?token=t")
+        fetched = []
+        monkeypatch.setattr(downloads, "download_file",
+                            lambda session, url, dest, fallback=None:
+                            (fetched.append((url, fallback)),
+                             dest.write_bytes(b"x"), True)[2])
+        downloads.process_deviation(
+            FakeClient(), make_dev(content={"src": blurred}), tmp_path, manifest,
+            unblur=True)
+        url, fallback = fetched[0]
+        assert "blur_" not in url                  # --unblur stripped it
+        assert "blur_100" in fallback              # and the retry is valid
+
+
     def test_downloads_content_src(self, tmp_path, manifest, monkeypatch):
         fetched = []
 

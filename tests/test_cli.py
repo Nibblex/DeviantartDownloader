@@ -520,6 +520,52 @@ class TestSyncAll:
         assert 'User "ghost" not found.' in stdout
         assert "Skipping ghost" in stdout
 
+    def test_an_account_gone_after_the_listing_is_skipped_too(
+            self, clean_cli_env, monkeypatch, capsys):
+        """The listing can succeed and a later call still find the profile gone.
+
+        The website listing comes off public pages; the API is what knows an
+        account is deactivated, and it is only asked once there is mature
+        content to resolve. That must end the user, not the run.
+        """
+        out = clean_cli_env / "out"
+        make_user_dir(out, "alice")
+        make_user_dir(out, "ghost")
+        page = {"results": [web_item(), blocked_web_item()], "hasMore": False}
+        monkeypatch.setattr(cli, "WebClient",
+                            lambda: FakeWebClient(pages=[dict(page), dict(page)]))
+
+        def api_page(client, endpoint, username, offset):
+            if username == "ghost":
+                raise api.UserNotFoundError('User "ghost" not found.')
+            return {"results": [make_dev(
+                url="https://www.deviantart.com/artist/art/Mature-Art-222222222",
+                title="Mature Art")], "has_more": False}
+
+        monkeypatch.setattr(listing, "_api_page", api_page)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        set_argv(monkeypatch, "--web", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y")
+        cli.run()      # must not raise: one dead account is not the run's end
+
+        stdout = capsys.readouterr().out
+        assert 'User "ghost" not found.' in stdout
+        assert "Skipping ghost" in stdout
+        assert "All users synced" in stdout
+        assert (out / "alice" / "api" / "Mature Art_222222222.png").is_file()
+
+    def test_a_named_profile_gone_after_the_listing_still_exits(
+            self, clean_cli_env, monkeypatch, both_routes):
+        def gone(client, endpoint, username, offset):
+            raise api.UserNotFoundError('User "ghost" not found.')
+
+        monkeypatch.setattr(listing, "_api_page", gone)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        set_argv(monkeypatch, "ghost", "--web", "-o", str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y")
+        with pytest.raises(SystemExit, match="does not exist"):
+            cli.run()
+
     def test_explicit_profile_with_empty_gallery_still_exits(
             self, clean_cli_env, monkeypatch, galleries):
         set_argv(monkeypatch, "someartist", "-o", str(clean_cli_env / "out"),
