@@ -325,7 +325,12 @@ Re-runs are incremental like any other sync, and a watched user whose account ha
 
 DeviantArt answers an overrun with `user_api_threshold`. That limit is **per account, not per endpoint**, and it reacts to short bursts rather than to a running total — so spreading the work over different endpoints buys nothing, and the only thing that helps is not going too fast.
 
-Two mechanisms keep a run under it:
+The cheapest request is the one never made, so two of them are avoided outright:
+
+- **The original file is often what you already have.** The API charges a request per work to hand out the original, and for most works it hands back exactly what `content.src` was already serving — the fullview is only re-encoded when the original is too large for it. The listing already says how many bytes the original has (`download_filesize`) and the CDN says how many the fullview has, so the two are compared first, over a head request that costs no quota. Measured over 23 mature downloadable works: **17 needed no request at all, 73%**. Every uncertainty — an unknown size, a CDN that will not say, a blur — spends the request instead, because being wrong the other way would save the fullview as if it were the original.
+- **An answer already paid for is not bought twice.** Reaching a mature work means finding the UUID the API is keyed by, which costs a page of the API's own listing. Those answers are kept in `_resolved.json` beside the download record, and the CDN URLs they hold carry no expiry, so a repair pass or a retried failure spends nothing on works it has already resolved. A cached answer that fails to download is dropped rather than retried forever, so the next run buys a fresh one. One exception keeps `--redownload-blurred` honest: an answer cached by a logged-out run holds the blurred placeholder, and once `--login` could do better it is looked up again instead of reused.
+
+Then two mechanisms keep what is left under the limit:
 
 - **One shared budget.** Every API request, whichever endpoint it is for and whichever worker makes it, is paced through a single limiter at `DA_API_RATE` requests per second (3 by default, `--api-rate` to override, `0` to disable). Workers queue for the next slot instead of racing each other, so the request rate stays flat no matter how you set `--api-workers`.
 - **One shared cool-down.** When a 429 does arrive, the first worker to see it backs off *the whole pool*, and the others wait that out rather than each starting their own ladder. Since a 429 means the account is going too fast, that is true of every worker at once; letting the rest keep firing only earns more 429s. The wait doubles from 4 s up to a 5-minute ceiling and resets after any request gets through.
@@ -376,8 +381,9 @@ The package is layered bottom-up, each module depending only on the ones above i
 | --- | --- |
 | `constants.py` | Endpoints, limits and the shared cancellation flag |
 | `config.py` | `.env` files and `DA_*` environment variables |
-| `naming.py` | Usernames, file names, and the deviation key shared by both routes |
+| `naming.py` | Usernames, file names, and the work and user ids each route reports |
 | `manifest.py` | `_downloaded.json`: what has been fetched, and where it landed |
+| `resolved.py` | `_resolved.json`: the API answers already paid for, so runs stop re-buying them |
 | `literature.py` | Rendering a text work's body (tiptap/HTML) to plain text |
 | `api.py` | The OAuth2 client: tokens, retries, rate limits |
 | `web.py` | The website's JSON endpoints and their media URLs |

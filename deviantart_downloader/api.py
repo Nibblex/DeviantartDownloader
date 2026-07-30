@@ -78,6 +78,10 @@ class RateLimiter:
     def __init__(self, rate: float = API_RATE):
         # A rate of 0 disables the pacing (the cool-down still applies).
         self.rate = rate
+        # Every request that went out, retries after a 429 included: this is the
+        # gate all of them pass through, whichever endpoint or worker they are
+        # for, so it is the one place that can count what a run spent.
+        self.requests = 0
         self._lock = threading.Lock()
         # The two deadlines are kept apart: _next_slot is the pacing alone and
         # _blocked_until the cool-down alone, and acquire honours whichever is
@@ -96,6 +100,7 @@ class RateLimiter:
         with self._lock:
             slot = max(self._next_slot, self._blocked_until, time.monotonic())
             self._next_slot = slot + interval
+            self.requests += 1
         # Consulted even when there is nothing to wait for, so a 'q' pressed
         # mid-run stops the pool before it issues another request.
         sleep_or_cancel(slot - time.monotonic())

@@ -4,7 +4,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 from .api import DeviantArtClient
 from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR, CancelledByUser, say
@@ -14,8 +14,12 @@ from .listing import list_gallery, resolve_via_api
 from .literature import is_text_work
 from .manifest import DownloadManifest
 from .naming import deviation_key, deviation_title, profile_label
+from .resolved import ResolvedCache
 from .storage import read_json, write_json
 from .web import WebClient, needs_api
+
+if TYPE_CHECKING:                     # overrides.py reads this module's
+    from .overrides import UserOverrides   # selectors, so the import is one-way
 
 STATUSES = ("downloaded", "replaced", "skipped", "failed", "no_media", "cancelled")
 
@@ -61,21 +65,22 @@ AXES = (
 ONLY_FILTERS = tuple(value for axis in AXES for value in axis.values)
 
 
-def only_tokens(values) -> frozenset[str]:
-    """The selector words in a --only value, however it was written.
+def parse_selectors(values) -> tuple[frozenset[str], list[str]]:
+    """The selector words in a --only value, and the ones that are not selectors.
 
-    Repeated words, comma-separated ones, or both; unknown words are left in,
-    for the caller to reject in the terms of wherever the value came from.
+    Repeated words, comma-separated ones, or both. Rejecting the strangers is
+    the caller's, who knows whether they were typed on the command line or
+    written in a file and can say so in those terms.
     """
-    return frozenset(
+    chosen = frozenset(
         token for value in values or ()
         for token in str(value).lower().replace(",", " ").split() if token)
+    return chosen, sorted(chosen - frozenset(ONLY_FILTERS))
 
 
 def parse_only(values) -> frozenset[str]:
     """The --only selectors, given as repeated words, commas, or both."""
-    chosen = only_tokens(values)
-    unknown = sorted(chosen - frozenset(ONLY_FILTERS))
+    chosen, unknown = parse_selectors(values)
     if unknown:
         # --only reads every word after it, so a profile written behind it is
         # swallowed as a selector; say so rather than leave it to be guessed.
@@ -180,6 +185,10 @@ def new_stats() -> dict:
     stats = {status: 0 for status in STATUSES}
     stats["bytes"] = 0
     stats["elapsed"] = 0.0
+    # What this cost in API requests: the number the rate limit is about, and
+    # the one a run has to justify. Unlike the rest it is not accumulated from
+    # galleries but read off the client, which counted every one of them.
+    stats["requests"] = 0
     # Keyed by the subdir each route writes to, so a job's subdir indexes its
     # own counters with no translation in between.
     stats[WEB_SUBDIR] = {"downloaded": 0, "bytes": 0}
@@ -193,6 +202,9 @@ def add_stats(dest: dict, src: dict) -> None:
         dest[status] += src[status]
     dest["bytes"] += src["bytes"]
     dest["elapsed"] += src["elapsed"]
+    # Requests are deliberately not folded: a user skipped whole never returns
+    # stats to fold, so summing galleries would undercount the run. The true
+    # number is the client's own counter, which the caller reads instead.
     for route in (WEB_SUBDIR, API_SUBDIR):
         dest[route]["downloaded"] += src[route]["downloaded"]
         dest[route]["bytes"] += src[route]["bytes"]
@@ -214,6 +226,9 @@ def summary_lines(stats: dict, *, users: int | None = None) -> list[str]:
         lines[0] += f" | Replaced (were blurred): {stats['replaced']}"
     if stats["cancelled"]:
         lines[0] += f" | Cancelled: {stats['cancelled']}"
+    # Always shown, zero included: a re-sync that spent nothing is the website
+    # route working, which is worth seeing rather than inferring.
+    lines[0] += f" | API requests: {stats['requests']}"
 
     # A repair pass can replace plenty while downloading nothing new, so the
     # breakdown counts both kinds of write.
@@ -334,6 +349,9 @@ def sync_gallery(
     is the one that knows whether the profile was asked for by name.
     """
     out_dir = output_root / username
+    # One client serves the whole run, so what this gallery spent is the
+    # difference across it rather than the counter itself.
+    spent_before = client.limiter.requests
     # Loading the manifest before fetching lets the listing stop at the
     # first fully downloaded page. --redownload-missing needs the whole
     # listing: the files it restores are recorded in the manifest, so the
@@ -394,12 +412,15 @@ def sync_gallery(
         # website, the rest (mature content) through the API.
         web_devs = [d for d in deviations if not needs_api(d)]
         blocked = [d for d in deviations if needs_api(d)]
+        # What earlier runs already paid to learn about the works that need the
+        # API, so revisiting them costs nothing.
+        resolved_cache = ResolvedCache(out_dir)
         if from_web and blocked:
             try:
                 blocked = resolve_via_api(client, username, blocked, deviations,
                                           manifest=manifest,
                                           redownload=revisiting,
-                                          gallery=gallery)
+                                          gallery=gallery, cache=resolved_cache)
             except CancelledByUser:           # 'q' during a rate-limit wait
                 _quit_before_download()
         if CANCEL.is_set():                   # 'q' during the mature-work lookup
@@ -466,6 +487,14 @@ def sync_gallery(
                     # works that did not make it.
                     line = say if status in ("downloaded", "skipped") else print
                     line(f"[{done}/{total}] {message}")
+                    # Said after the failure it follows, and by print for the
+                    # same reason: whatever went wrong, the answer that led here
+                    # is not worth keeping, and the next run paying a page for a
+                    # fresh one is worth knowing before it does.
+                    if (status == "failed" and subdir == API_SUBDIR
+                            and resolved_cache.forget(deviation_key(dev))):
+                        print("  Dropped its cached API answer; the next run "
+                              "looks the work up again.")
                     # The footer names the route too: the scrolling lines carry
                     # it in the path (web/… or api/…), but under -q the footer is
                     # all there is, and the two behave nothing alike -- the API
@@ -485,6 +514,7 @@ def sync_gallery(
                 api_pool.shutdown(cancel_futures=True)
 
     counts["elapsed"] = time.monotonic() - started
+    counts["requests"] = client.limiter.requests - spent_before
     lines = summary_lines(counts)
     if interrupted:
         print(f"\nInterrupted ({done} of {total} works processed). {lines[0]}")

@@ -5,7 +5,8 @@ import json
 
 import pytest
 
-from deviantart_downloader import api, cli, downloads, listing, overrides, sync
+from deviantart_downloader import (api, cli, downloads, listing, overrides,
+                                   resolved, sync)
 from deviantart_downloader.constants import CANCEL, CancelledByUser
 
 from .conftest import (BASE_URI, DEV_ID, WEB_USER_ID, FakeClient, FakeWebClient,
@@ -574,6 +575,92 @@ def both_routes(monkeypatch):
     return web
 
 
+class TestResolvedCacheAcrossRuns:
+    """What a run paid to learn about a mature work, kept for the next one."""
+
+    MATURE_KEY = "222222222"
+
+    def gallery(self, monkeypatch, runs=1):
+        """One ordinary work and one the website only serves blurred, `runs` times."""
+        web = FakeWebClient(pages=[
+            {"results": [web_item(), blocked_web_item()], "hasMore": False}
+            for _ in range(runs)])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+
+        def api_page(client, endpoint, username, offset):
+            # Through the limiter, as the real one is: it is the gate that
+            # counts what a run spends.
+            client.limiter.acquire()
+            return {"results": [make_dev(
+                url="https://www.deviantart.com/artist/art/Mature-Art-222222222",
+                title="Mature Art")], "has_more": False}
+
+        monkeypatch.setattr(listing, "_api_page", api_page)
+
+    def run(self, monkeypatch, out, *extra):
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "-w", "1", *extra)
+        cli.run()
+
+    def cached(self, out):
+        path = out / "artist" / resolved.FILENAME
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+    def test_the_answer_is_kept_for_the_next_run(self, clean_cli_env, monkeypatch):
+        self.gallery(monkeypatch)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        self.run(monkeypatch, out)
+        assert list(self.cached(out)) == [self.MATURE_KEY]
+
+    def test_a_second_run_spends_no_request_on_it(self, clean_cli_env, monkeypatch,
+                                                 capsys):
+        self.gallery(monkeypatch, runs=2)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        self.run(monkeypatch, out)
+        # A lookup would be a test failure now, not a request.
+        monkeypatch.setattr(listing, "_api_page",
+                            lambda *a, **k: pytest.fail("no page needed"))
+        capsys.readouterr()
+        self.run(monkeypatch, out, "--redownload-missing")
+        assert "already resolved in a previous run" in capsys.readouterr().out
+
+    def test_an_answer_that_did_not_work_is_dropped(self, clean_cli_env, monkeypatch,
+                                                   capsys):
+        # Whatever went wrong, the next run pays for a fresh answer rather than
+        # failing on the same URL forever.
+        self.gallery(monkeypatch)
+        monkeypatch.setattr(downloads, "download_file",
+                            lambda session, url, dest, fallback=None: False)
+        out = clean_cli_env / "out"
+        self.run(monkeypatch, out)
+        assert self.cached(out) == {}
+        assert "Dropped its cached API answer" in capsys.readouterr().out
+
+    def test_the_drop_is_reported_even_under_quiet(self, clean_cli_env, monkeypatch,
+                                                  capsys):
+        self.gallery(monkeypatch)
+        monkeypatch.setattr(downloads, "download_file",
+                            lambda session, url, dest, fallback=None: False)
+        self.run(monkeypatch, clean_cli_env / "out", "-q")
+        # It follows a failure, and -q never drops those.
+        assert "Dropped its cached API answer" in capsys.readouterr().out
+
+    def test_the_run_reports_what_it_spent(self, clean_cli_env, monkeypatch, capsys):
+        self.gallery(monkeypatch)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        self.run(monkeypatch, out)
+        # The one listing page the mature work needed; the website listed the
+        # rest for nothing.
+        assert "API requests: 1" in capsys.readouterr().out
+        # And a second run, answered from the cache, spends nothing at all.
+        self.gallery(monkeypatch)
+        self.run(monkeypatch, out, "--redownload-missing")
+        assert "API requests: 0" in capsys.readouterr().out
+
+
 @pytest.fixture
 def galleries(monkeypatch):
     """Patch fetch_gallery/download_file; galleries dict drives the data."""
@@ -613,6 +700,29 @@ class TestSyncAll:
                 "1 item(s) downloaded") in stdout
         assert ("bob — https://www.deviantart.com/bob      "
                 "1 item(s) downloaded") in stdout
+
+    def test_the_total_counts_what_a_skipped_user_spent(self, clean_cli_env,
+                                                        monkeypatch, capsys):
+        """A user skipped whole returns no stats to add up, but finding out that
+        the gallery was empty still cost requests."""
+        out = clean_cli_env / "out"
+        make_user_dir(out, "ghost")     # deactivated account: empty gallery
+        make_user_dir(out, "alice")
+
+        def fetch(client, username, **kw):
+            client.limiter.acquire()    # the listing page, as the real one is
+            return [make_dev()] if username == "alice" else []
+
+        monkeypatch.setattr(listing, "fetch_gallery", fetch)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y")
+        cli.run()
+
+        stdout = capsys.readouterr().out
+        assert "Skipping ghost" in stdout
+        # One page each: the summed-per-gallery number would have said 1.
+        assert "API requests: 2" in stdout
 
     def test_empty_gallery_is_skipped_not_fatal(self, clean_cli_env, monkeypatch,
                                                 galleries, capsys):

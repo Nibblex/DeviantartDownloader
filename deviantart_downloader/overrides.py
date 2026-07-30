@@ -22,37 +22,21 @@ import json
 import sys
 from pathlib import Path
 
-from .constants import API_SUBDIR, TEXT_FORMATS, WEB_SUBDIR, say
+from .constants import TEXT_FORMATS, say
+from .naming import user_ids
 from .storage import write_json
-from .sync import ONLY_FILTERS, only_tokens
+from .sync import ONLY_FILTERS, parse_selectors
 
 # Looked for in the output folder, beside the galleries it has something to say
 # about, unless --user-config names another file.
 FILENAME = "_users.json"
 
-# The settings an entry may carry, spelled as the flags they stand for.
+# The settings an entry may carry, spelled as the flags they stand for; SETTINGS
+# below pairs each with the reader that validates its value.
 ONLY = "only"
 FORMAT = "literature-format"
-SETTINGS = (ONLY, FORMAT)
 # Written by the tool rather than by hand: what a rename is recognised by.
 IDS = "ids"
-
-
-def user_ids(deviations: list[dict]) -> dict[str, str]:
-    """The listed works' author id, under the name of the route that listed them.
-
-    The two routes disagree about user ids: the website reports a numeric one,
-    the API a UUID, and for one and the same user those are different values.
-    Neither can stand in for the other, so each is kept under its own route's
-    name. Whichever route ran, the id it reports is the part of a user that a
-    rename does not change.
-    """
-    ids: dict[str, str] = {}
-    for dev in deviations:
-        route = WEB_SUBDIR if dev.get("_source") == WEB_SUBDIR else API_SUBDIR
-        if route not in ids and (uid := (dev.get("author") or {}).get("userid")):
-            ids[route] = str(uid)
-    return ids
 
 
 def load_overrides(path: str | None, output_root: Path,
@@ -103,25 +87,14 @@ class UserOverrides:
         first run that leaves the flag off would find the entry stale.
         """
         ids = user_ids(deviations)
-        key = self._named(username)
-        changed = False
+        key, moved = self._key_for(username, ids)
         if key is None:
-            key = self._renamed(ids)
-            if key is None:
-                return only, text_format
-            print(f'  {self.path.name}: "{key}" is now "{username}"; moving '
-                  "those settings over.")
-            self._entries[username] = self._entries.pop(key)
-            key, changed = username, True
-        entry = self._entries[key]
-        known = entry.get(IDS) or {}
-        if learned := {r: v for r, v in ids.items() if known.get(r) != v}:
-            entry[IDS] = {**known, **learned}
-            changed = True
-        if changed:
+            return only, text_format
+        if self._learn(key, ids) or moved:
             self._save()
         settings = {name: value
-                    for name, value in _settings(entry, key, self.path).items()
+                    for name, value in _settings(self._entries[key], key,
+                                                 self.path).items()
                     if name not in self.locked}
         if settings:
             say(f"  {self.path.name}: {_describe(settings)}")
@@ -138,26 +111,39 @@ class UserOverrides:
             for name in _settings(entry, username, self.path)
             if name in self.locked)
 
-    def _named(self, username: str) -> str | None:
-        """The key spelling this user's name, whatever its case.
+    def _key_for(self, username: str, ids: dict[str, str]) -> tuple[str | None, bool]:
+        """This user's entry key, and whether following a rename moved it there.
 
-        DeviantArt names are unique whichever way they are capitalised, so the
-        file is read the same way rather than making the reader match the case
-        of a profile URL.
+        A key spelling the name wins, whatever its case: DeviantArt names are
+        unique whichever way they are capitalised, and if someone has taken the
+        old name over, the entry filed under the name asked for is the answer
+        rather than a stranger's settings. Only when no key spells it does the
+        recorded id get a say, which is exactly the case a rename leaves behind;
+        the entry is then re-keyed to the new name, so the file stays readable
+        to whoever wrote it. (None, False) when the file does not know this user.
         """
         wanted = username.casefold()
-        return next((k for k in self._entries if k.casefold() == wanted), None)
+        if named := next((k for k in self._entries if k.casefold() == wanted), None):
+            return named, False
+        # An entry no run has touched yet has no recorded id, so it is never
+        # mistaken for anyone.
+        old = next((key for key, entry in self._entries.items()
+                    if any((entry.get(IDS) or {}).get(route) == value
+                           for route, value in ids.items())), None)
+        if old is None:
+            return None, False
+        print(f'  {self.path.name}: "{old}" is now "{username}"; moving those '
+              "settings over.")
+        self._entries[username] = self._entries.pop(old)
+        return username, True
 
-    def _renamed(self, ids: dict[str, str]) -> str | None:
-        """The key of the entry whose recorded id is this user's, if any.
-
-        Only reached when no key spells the name, which is exactly the case a
-        rename leaves behind. An entry no run has touched yet has no recorded
-        id and so is never mistaken for anyone.
-        """
-        return next((key for key, entry in self._entries.items()
-                     if any((entry.get(IDS) or {}).get(route) == value
-                            for route, value in ids.items())), None)
+    def _learn(self, key: str, ids: dict[str, str]) -> bool:
+        """Record the ids this run saw. True when any of them was news."""
+        known = self._entries[key].get(IDS) or {}
+        if not (learned := {r: v for r, v in ids.items() if known.get(r) != v}):
+            return False
+        self._entries[key][IDS] = {**known, **learned}
+        return True
 
     def _save(self) -> None:
         """Write the file back, without taking the run down if that fails.
@@ -212,10 +198,7 @@ def _settings(entry: dict, username: str, path: Path) -> dict:
         if key not in SETTINGS:
             sys.exit(f'{path}: "{username}" sets "{written}", which is not a '
                      f"per-user setting. Accepted: {', '.join(SETTINGS)}.")
-        if key == ONLY:
-            out[ONLY] = _only(value, username, path)
-        else:
-            out[FORMAT] = _format(value, username, path)
+        out[key] = SETTINGS[key](value, username, path)
     return out
 
 
@@ -226,8 +209,8 @@ def _only(value, username: str, path: Path) -> frozenset[str]:
     reading as on the command line. An empty value selects everything, which is
     how a user opts out of a run-wide --only.
     """
-    chosen = only_tokens(value if isinstance(value, list) else [value])
-    if unknown := sorted(chosen - frozenset(ONLY_FILTERS)):
+    chosen, unknown = parse_selectors(value if isinstance(value, list) else [value])
+    if unknown:
         sys.exit(f'{path}: "{username}" asks --only for {", ".join(unknown)}, '
                  f"which is not among {', '.join(ONLY_FILTERS)}.")
     return chosen
@@ -240,6 +223,11 @@ def _format(value, username: str, path: Path) -> str:
         sys.exit(f'{path}: "{username}" asks --literature-format for {value!r}, '
                  f"which must be one of {', '.join(TEXT_FORMATS)}.")
     return chosen
+
+
+# What an entry may set, and how each value is read. A setting is a row here
+# and a reader above, rather than another branch in _settings.
+SETTINGS = {ONLY: _only, FORMAT: _format}
 
 
 def _describe(settings: dict) -> str:

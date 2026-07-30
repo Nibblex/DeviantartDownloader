@@ -193,7 +193,7 @@ def resolve_via_api(
     client: DeviantArtClient, username: str, blocked: list[dict],
     ordered: list[dict] | None = None, *,
     manifest: DownloadManifest, redownload: bool,
-    gallery: str | None = None,
+    gallery: str | None = None, cache: "ResolvedCache | None" = None,
 ) -> list[dict]:
     """Look up the API entries of the works the website only serves blurred.
 
@@ -203,6 +203,10 @@ def resolve_via_api(
     blocked work still has to be downloaded, which keeps an incremental sync of
     an all-ages gallery entirely free of API calls. `redownload` widens that to
     every blocked work, for the flags that revisit ones already downloaded.
+
+    `cache` holds the answers earlier runs paid for; the works it already
+    accounts for cost nothing, and a run that finds every one of them there
+    spends no request at all.
 
     Both routes list a gallery newest-first in the same order, so each blocked
     work's position in `ordered` (the full website listing) points at the API
@@ -215,12 +219,30 @@ def resolve_via_api(
                if redownload or not manifest.has(deviation_key(d))]
     if not pending:
         return []
-    say(f"\n{len(pending)} mature work(s) need the API; fetching the pages "
-        "that hold them...")
+
+    index: dict[str, dict] = {}       # deviation key -> API entry
+    # Answers a previous run paid for, which cost nothing to reuse. Seeding the
+    # index with them is all it takes: everything below asks what is still
+    # missing, so only the pages holding *those* works are ever fetched.
+    if cache is not None:
+        for dev in pending:
+            key = deviation_key(dev)
+            if (entry := cache.get(key, user_mode=client.user_mode)) is not None:
+                index[key] = entry
+    if index:
+        say(f"\n{len(index)} of the mature works were already resolved in a "
+            f"previous run ({cache.path.name}); no request needed for those.")
+    if len(index) == len(pending):
+        # Every one of them answered, so no key can be missing below.
+        return [index[deviation_key(d)] for d in pending]
+
+    say(f"\n{len(pending) - len(index)} mature work(s) need the API; fetching "
+        "the pages that hold them...")
+    # Asked for only once something has to be fetched: with every work answered
+    # from the cache, resolving the folder would be the run's only API request.
     folder = resolve_folder_api(client, username, gallery) if gallery else None
     endpoint = f"gallery/{folder}" if folder else "gallery/all"
 
-    index: dict[str, dict] = {}       # deviation key -> API entry
     fetched: set[int] = set()         # page offsets already retrieved
     terminal: list[int] = []          # offsets whose page reported no more
 
@@ -243,10 +265,11 @@ def resolve_via_api(
     def missing() -> list[dict]:
         return [d for d in pending if deviation_key(d) not in index]
 
-    # Pass 1: the pages the website positions point at.
+    # Pass 1: the pages the website positions point at. Only the works still
+    # missing count: a page held nothing else worth fetching it for.
     position = {deviation_key(d): i for i, d in enumerate(ordered or [])}
     wanted = sorted({(position[k] // PAGE_LIMIT) * PAGE_LIMIT
-                     for d in pending if (k := deviation_key(d)) in position})
+                     for d in missing() if (k := deviation_key(d)) in position})
     for off in wanted:
         wait_if_paused()
         if CANCEL.is_set():                   # 'q' during the lookup
@@ -270,8 +293,10 @@ def resolve_via_api(
         data = absorb(offset)
         offset = data.get("next_offset") or offset + PAGE_LIMIT
 
-    resolved = [index[k] for d in pending if (k := deviation_key(d)) in index]
-    if len(resolved) < len(pending):
-        print(f"  WARNING: {len(pending) - len(resolved)} mature work(s) were "
+    answered = {k: index[k] for d in pending if (k := deviation_key(d)) in index}
+    if len(answered) < len(pending):
+        print(f"  WARNING: {len(pending) - len(answered)} mature work(s) were "
               "not in the API listing.")
-    return resolved
+    if cache is not None:
+        cache.remember(answered)
+    return list(answered.values())

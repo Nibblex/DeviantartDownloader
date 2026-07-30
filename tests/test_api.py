@@ -130,6 +130,21 @@ class TestRateLimiter:
         # The first request goes straight through; only the gaps are paid for.
         assert time.monotonic() - started >= 0.02
 
+    def test_it_counts_every_request_that_went_out(self):
+        limiter = api.RateLimiter(rate=0)
+        for _ in range(3):
+            limiter.acquire()
+        assert limiter.requests == 3
+
+    def test_retries_after_a_429_count_too(self):
+        # The threshold is about requests, not about calls that succeeded, so
+        # the number a run reports has to be the one the limit is measured in.
+        limiter = api.RateLimiter(rate=0)
+        limiter.acquire()
+        limiter.penalise(retry_after=0)
+        limiter.acquire()
+        assert limiter.requests == 2
+
     def test_a_rate_of_zero_disables_the_pacing(self):
         limiter = api.RateLimiter(rate=0)
         started = time.monotonic()

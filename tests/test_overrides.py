@@ -27,22 +27,6 @@ def read_back(tmp_path):
     return json.loads((tmp_path / ov.FILENAME).read_text(encoding="utf-8"))
 
 
-class TestUserIds:
-    def test_a_website_listing_reports_the_numeric_id(self):
-        assert ov.user_ids([WEB_WORK]) == {"web": str(WEB_USER_ID)}
-
-    def test_an_api_listing_reports_the_uuid(self):
-        assert ov.user_ids([make_dev()]) == {"api": API_USER_ID}
-
-    def test_a_listing_without_an_author_reports_nothing(self):
-        assert ov.user_ids([{"_source": WEB_SUBDIR}, {}]) == {}
-
-    def test_both_routes_are_kept_apart(self):
-        # A run that used both routes learns one id per route, not one id.
-        assert ov.user_ids([WEB_WORK, make_dev()]) == {
-            "web": str(WEB_USER_ID), "api": API_USER_ID}
-
-
 class TestNoSettings:
     def test_a_missing_file_changes_nothing(self, tmp_path):
         conf = ov.UserOverrides(tmp_path / ov.FILENAME)

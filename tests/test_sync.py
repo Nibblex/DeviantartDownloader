@@ -243,8 +243,25 @@ class TestSummaryLines:
         stats["no_media"] = 1
         lines = sync.summary_lines(stats)
         assert lines == [
-            "Downloaded: 0 | Skipped (already existed): 5 | No file: 1 | Failed: 0"
+            "Downloaded: 0 | Skipped (already existed): 5 | No file: 1 "
+            "| Failed: 0 | API requests: 0"
         ]
+
+    def test_the_api_requests_are_always_counted(self):
+        # Zero included: a re-sync that spent nothing is the website route
+        # working, which is worth seeing rather than inferring.
+        stats = sync.new_stats()
+        assert "API requests: 0" in sync.summary_lines(stats)[0]
+        stats["requests"] = 7
+        assert "API requests: 7" in sync.summary_lines(stats)[0]
+
+    def test_the_request_count_is_not_accumulated(self):
+        """It is read off the client, not summed: a user skipped whole returns
+        no stats to add up, but the requests that found that out were spent."""
+        totals, one = sync.new_stats(), sync.new_stats()
+        one["requests"] = 4
+        sync.add_stats(totals, one)
+        assert totals["requests"] == 0
 
     def test_breaks_downloads_down_by_route(self):
         stats = sync.new_stats()

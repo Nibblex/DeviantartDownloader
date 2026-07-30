@@ -9,9 +9,10 @@ from .api import DeviantArtClient
 from .constants import API_SUBDIR, CANCEL, wait_if_paused
 from .literature import KIND_HTML, KIND_TEXT, classify_web_html, is_text_work
 from .manifest import DownloadManifest
-from .naming import (clamp_wixmp_blur, deviation_key, deviation_suffix,
-                     deviation_title, guess_extension, is_blurred,
-                     sanitize_filename, unblur_wixmp_url, username_from_url)
+from .naming import (clamp_wixmp_blur, content_src, deviation_key,
+                     deviation_suffix, deviation_title, guess_extension,
+                     is_blurred, sanitize_filename, unblur_wixmp_url,
+                     username_from_url)
 from .web import WebClient, WebError
 
 
@@ -24,6 +25,33 @@ def remote_size(session: requests.Session, url: str) -> int | None:
     except (requests.RequestException, KeyError, ValueError):
         pass
     return None
+
+
+def _is_the_original(session: requests.Session, offered: str,
+                     original_size) -> bool:
+    """True when the URL the listing already carries weighs what the original does.
+
+    The API charges a request per work to hand out the original file, and for
+    most works it hands back what content.src was already serving: the fullview
+    is only re-encoded when the original is too large for it. The listing says
+    how many bytes the original has (download_filesize) and the CDN says how
+    many the fullview has, so the two can be compared before spending anything
+    -- the head request costs no API quota.
+
+    Every uncertainty answers False, which spends the request: an unknown size,
+    or a CDN that will not say. Being wrong that way costs a request; the other
+    way would silently save the fullview as if it were the original.
+
+    A blur is the one uncertainty answered without asking. The placeholder is a
+    different, smaller file, so it could never weigh what the original does, and
+    the head request would be a round trip spent to learn nothing -- on exactly
+    the works a logged-out run is full of.
+    """
+    if not offered or not isinstance(original_size, int) or original_size <= 0:
+        return False
+    if is_blurred(offered):
+        return False
+    return remote_size(session, offered) == original_size
 
 
 def download_file(
@@ -151,7 +179,7 @@ def process_deviation(
             # --redownload-blurred replaces the blurred placeholder a logged-out
             # run settled for. Only the API route ever handed one back, and only
             # if the API is offering something better now is it worth the bytes.
-            offered = (dev.get("content") or {}).get("src") or ""
+            offered = content_src(dev)
             if not (redownload_blurred and existing.startswith(f"{API_SUBDIR}/")):
                 return "skipped", f"Already exists, skipped: {existing}"
             if is_blurred(offered):
@@ -163,15 +191,17 @@ def process_deviation(
 
     # 1) Prefer the original file if the author allows downloading it.
     #
-    # This costs one API request per work, and the website route cannot take it
-    # over: its deviation page does carry a download URL (extended.download),
-    # but that URL answers 404 to anyone without a logged-in browser session,
-    # which the OAuth flow does not provide. Works the website only serves
-    # blurred are not offered one there at all. So the API is the only source
-    # of originals, and content.src (the derived fullview) is the fallback.
+    # The API is the only source of originals: the website's deviation page
+    # carries a download URL, but it answers 404 to anyone without a logged-in
+    # browser session, which the OAuth flow does not provide, and works served
+    # blurred are not offered one there at all. So content.src (the derived
+    # fullview) is the fallback -- except that it often *is* the original file
+    # already, which is worth finding out before paying for the answer.
     file_url = None
     fallback_url = None
-    if use_api and dev.get("is_downloadable"):
+    offered = content_src(dev)
+    if use_api and dev.get("is_downloadable") and not _is_the_original(
+            session, offered, dev.get("download_filesize")):
         try:
             dl = client.api_get(f"deviation/download/{dev_id}")
             file_url = dl.get("src")
@@ -180,8 +210,7 @@ def process_deviation(
 
     # 2) Otherwise, the highest publicly available resolution image
     if not file_url:
-        content = dev.get("content") or {}
-        file_url = content.get("src")
+        file_url = content_src(dev)
         if file_url and unblur:
             unblurred = unblur_wixmp_url(file_url)
             if unblurred != file_url:

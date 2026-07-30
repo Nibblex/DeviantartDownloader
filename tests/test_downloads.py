@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 import requests
 
 from deviantart_downloader import downloads
@@ -9,7 +10,7 @@ from deviantart_downloader import web as web_mod
 from deviantart_downloader.constants import CANCEL
 
 from .conftest import (BASE_URI, DEV_ID, FakeClient, FakeResponse, FakeSession,
-                       make_dev, recording_download)
+                       fake_download, make_dev, recording_download)
 
 
 def _tiptap(text):
@@ -138,6 +139,70 @@ class TestProcessDeviation:
         assert status == "downloaded"
         assert fetched == ["https://example.com/original.png"]
         assert client.calls[0][0] == f"deviation/download/{DEV_ID}"
+
+    def test_the_fullview_being_the_original_spends_no_request(
+            self, tmp_path, manifest, monkeypatch):
+        """The listing says what the original weighs; the CDN says what this does.
+
+        Most works are handed back unchanged by the download endpoint, so the
+        request it costs is worth avoiding when the answer is already on disk's
+        doorstep.
+        """
+        client = FakeClient()                       # no page queued: a call would raise
+        fetched = []
+        monkeypatch.setattr(downloads, "download_file", recording_download(fetched))
+        monkeypatch.setattr(downloads, "remote_size", lambda session, url: 4096)
+        status, _ = downloads.process_deviation(
+            client, make_dev(is_downloadable=True, download_filesize=4096),
+            tmp_path, manifest)
+        assert status == "downloaded"
+        assert [url for url, _ in fetched] == ["https://example.com/pic.png"]
+        assert client.calls == []
+
+    @pytest.mark.parametrize("remote,size", [
+        (2048, 4096),      # the fullview was re-encoded smaller
+        (None, 4096),      # the CDN would not say
+        (4096, None),      # the listing does not know the original's size
+        (4096, 0),         # nor when it says nothing useful
+    ])
+    def test_anything_short_of_a_match_still_asks_for_the_original(
+            self, tmp_path, manifest, monkeypatch, remote, size):
+        client = FakeClient(pages=[{"src": "https://example.com/original.png"}])
+        fetched = []
+        monkeypatch.setattr(downloads, "download_file", recording_download(fetched))
+        monkeypatch.setattr(downloads, "remote_size", lambda session, url: remote)
+        downloads.process_deviation(
+            client, make_dev(is_downloadable=True, download_filesize=size),
+            tmp_path, manifest)
+        assert client.calls[0][0] == f"deviation/download/{DEV_ID}"
+        assert [url for url, _ in fetched] == ["https://example.com/original.png"]
+
+    def test_a_blur_is_not_even_measured(self, tmp_path, manifest, monkeypatch):
+        """The placeholder is a different, smaller file: it could never match,
+        so the head request would be a round trip spent to learn nothing."""
+        client = FakeClient(pages=[{"src": "https://example.com/original.png"}])
+        blurred = ("https://images-wixmp-a.wixmp.com/f/u/x.jpg"
+                   "/v1/fill/w_300,h_200,q_70,strp,blur_60/x-fullview.jpg?token=t")
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        monkeypatch.setattr(downloads, "remote_size",
+                            lambda session, url: pytest.fail("no head on a blur"))
+        downloads.process_deviation(
+            client, make_dev(is_downloadable=True, download_filesize=4096,
+                             content={"src": blurred}),
+            tmp_path, manifest)
+        # It still asks for the original, as it always had to.
+        assert client.calls[0][0] == f"deviation/download/{DEV_ID}"
+
+    def test_the_website_route_never_asks_either_way(self, tmp_path, manifest,
+                                                     monkeypatch):
+        client = FakeClient()
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        monkeypatch.setattr(downloads, "remote_size",
+                            lambda session, url: pytest.fail("no head needed"))
+        downloads.process_deviation(
+            client, make_dev(is_downloadable=True, download_filesize=4096),
+            tmp_path, manifest, use_api=False)
+        assert client.calls == []
 
     def test_falls_back_when_download_endpoint_fails(self, tmp_path, manifest,
                                                      monkeypatch):

@@ -169,8 +169,8 @@ def run():
                        if given is not None)
     only = parse_only(args.only if args.only is not None
                       else [os.environ.get("DA_ONLY", "")])
-    text_format = args.literature_format or env_choice("DA_LITERATURE_FORMAT",
-                                                       "txt", TEXT_FORMATS)
+    text_format = (args.literature_format if args.literature_format is not None
+                   else env_choice("DA_LITERATURE_FORMAT", "txt", TEXT_FORMATS))
 
     if args.web_workers < 1:
         sys.exit(f"The number of web workers must be at least 1 (got: {args.web_workers}).")
@@ -278,6 +278,10 @@ def run():
 
     totals = new_stats()
     per_user = []
+    # The run's own count, rather than the sum of the galleries': a user skipped
+    # whole returns no stats to add up, but the requests spent finding that out
+    # were still spent.
+    spent_before = client.limiter.requests
     for username in usernames:
         try:
             counts = sync_gallery(
@@ -307,6 +311,7 @@ def run():
         print()
 
     if len(usernames) > 1:
+        totals["requests"] = client.limiter.requests - spent_before
         lines = summary_lines(totals, users=len(per_user))
         print(f"All users synced. {lines[0]}")
         for line in lines[1:]:

@@ -5,7 +5,7 @@ import re
 import sys
 from urllib.parse import unquote, urlparse
 
-from .constants import WEB_BASE
+from .constants import API_SUBDIR, WEB_BASE, WEB_SUBDIR
 
 
 def profile_url(username: str) -> str:
@@ -69,9 +69,32 @@ def deviation_key(dev: dict) -> str:
     return dev.get("deviationid") or ""
 
 
+def user_ids(deviations: list[dict]) -> dict[str, str]:
+    """The listed works' author id, under the name of the route that listed them.
+
+    The same problem as deviation_key, one level up and without its answer: the
+    two routes disagree about user ids -- the website reports a numeric one, the
+    API a UUID, and for one and the same user those are different values -- and
+    there is no third field both carry. Neither can stand in for the other, so
+    each is kept under its own route's name. Whichever route ran, the id it
+    reports is the part of a user that a rename does not change.
+    """
+    ids: dict[str, str] = {}
+    for dev in deviations:
+        route = WEB_SUBDIR if dev.get("_source") == WEB_SUBDIR else API_SUBDIR
+        if route not in ids and (uid := (dev.get("author") or {}).get("userid")):
+            ids[route] = str(uid)
+    return ids
+
+
 def deviation_title(dev: dict) -> str:
     """A work's title, with the placeholder used when it has none."""
     return dev.get("title") or "untitled"
+
+
+def content_src(dev: dict) -> str:
+    """The URL a listing entry offers for a work, or "" when it offers none."""
+    return (dev.get("content") or {}).get("src") or ""
 
 
 def deviation_suffix(dev: dict) -> str:

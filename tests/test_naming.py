@@ -4,8 +4,10 @@ import pytest
 
 from deviantart_downloader import web as web_mod
 from deviantart_downloader import naming
+from deviantart_downloader.constants import WEB_SUBDIR
 
-from .conftest import WEB_ID, WEB_URL, DEV_ID, make_dev, web_item
+from .conftest import (API_USER_ID, DEV_ID, WEB_ID, WEB_URL, WEB_USER_ID,
+                       make_dev, web_item)
 
 
 class TestExtractUsername:
@@ -89,6 +91,28 @@ class TestDeviationKey:
 
     def test_unidentifiable_work_has_no_key(self):
         assert naming.deviation_key({"title": "x"}) == ""
+
+
+class TestUserIds:
+    """The same problem as the deviation key, one level up: no shared field."""
+
+    WEB_WORK = {"_source": WEB_SUBDIR,
+                "author": {"userid": WEB_USER_ID, "username": "artist"}}
+
+    def test_a_website_listing_reports_the_numeric_id(self):
+        assert naming.user_ids([self.WEB_WORK]) == {"web": str(WEB_USER_ID)}
+
+    def test_an_api_listing_reports_the_uuid(self):
+        assert naming.user_ids([make_dev()]) == {"api": API_USER_ID}
+
+    def test_a_listing_without_an_author_reports_nothing(self):
+        assert naming.user_ids([{"_source": WEB_SUBDIR}, {}]) == {}
+
+    def test_the_two_routes_are_kept_apart(self):
+        # A run that used both routes learns one id per route, not one id: for
+        # the same user the two values differ.
+        assert naming.user_ids([self.WEB_WORK, make_dev()]) == {
+            "web": str(WEB_USER_ID), "api": API_USER_ID}
 
 
 class TestClampWixmpBlur:

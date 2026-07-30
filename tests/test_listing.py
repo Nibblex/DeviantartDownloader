@@ -7,6 +7,7 @@ from deviantart_downloader import listing
 from deviantart_downloader import web as web_mod
 from deviantart_downloader.constants import CANCEL, WEB_SUBDIR
 from deviantart_downloader.naming import deviation_key
+from deviantart_downloader.resolved import ResolvedCache
 
 from .conftest import (DEV_ID, WEB_ID, FakeClient, FakeWebClient,
                        blocked_web_item, make_dev, web_item)
@@ -228,6 +229,60 @@ class TestResolveViaApi:
         resolved = listing.resolve_via_api(client, "artist", [blocked], [blocked],
                                       manifest=manifest, redownload=False)
         assert resolved == [api_entry]
+
+    def test_an_answer_a_previous_run_paid_for_costs_nothing(self, tmp_path, capsys):
+        manifest = manifest_mod.DownloadManifest(tmp_path)
+        blocked = self.blocked()
+        api_entry = make_dev(url=blocked["url"], title="Mature Art")
+        cache = ResolvedCache(tmp_path)
+        cache.remember({deviation_key(blocked): api_entry})
+        # No page queued and a gallery name that would cost a folder lookup:
+        # either request would raise.
+        client = FakeClient()
+        resolved = listing.resolve_via_api(client, "artist", [blocked], [blocked],
+                                           manifest=manifest, redownload=True,
+                                           gallery="Sketches", cache=cache)
+        assert resolved == [api_entry]
+        assert client.calls == []
+        assert "already resolved in a previous run" in capsys.readouterr().out
+
+    def test_only_the_works_missing_from_the_cache_are_looked_up(self, tmp_path):
+        manifest = manifest_mod.DownloadManifest(tmp_path)
+        cached = self.blocked()
+        fresh = web_mod.normalize_web_deviation(
+            blocked_web_item(deviationId=333, url="https://x/art/y-333"))
+        cached_entry = make_dev(url=cached["url"], title="Cached")
+        fresh_entry = make_dev(url=fresh["url"], title="Fresh")
+        cache = ResolvedCache(tmp_path)
+        cache.remember({deviation_key(cached): cached_entry})
+        client = FakeClient(pages=[{"results": [fresh_entry], "has_more": False}])
+        resolved = listing.resolve_via_api(client, "artist", [cached, fresh],
+                                           [cached, fresh], manifest=manifest,
+                                           redownload=True, cache=cache)
+        # One page for the one work that needed it, and the order still follows
+        # the listing rather than putting the cached answers first.
+        assert resolved == [cached_entry, fresh_entry]
+        assert len(client.calls) == 1
+        # What that page cost is now recorded too.
+        assert ResolvedCache(tmp_path).get(deviation_key(fresh),
+                                           user_mode=False) == fresh_entry
+
+    def test_a_cached_blur_is_looked_up_again_once_logged_in(self, tmp_path):
+        manifest = manifest_mod.DownloadManifest(tmp_path)
+        blocked = self.blocked()
+        blurred = make_dev(url=blocked["url"], content={
+            "src": "https://images-wixmp-a.wixmp.com/f/u/x.jpg"
+                   "/v1/fill/w_300,h_200,q_70,strp,blur_60/x-fullview.jpg?token=t"})
+        clean = make_dev(url=blocked["url"], title="Unblurred")
+        cache = ResolvedCache(tmp_path)
+        cache.remember({deviation_key(blocked): blurred})
+        client = FakeClient(pages=[{"results": [clean], "has_more": False}],
+                           user_mode=True)
+        resolved = listing.resolve_via_api(client, "artist", [blocked], [blocked],
+                                           manifest=manifest, redownload=True,
+                                           cache=cache)
+        assert resolved == [clean]
+        assert len(client.calls) == 1
 
     def test_fetches_only_the_page_holding_the_blocked_work(self, tmp_path):
         # A single mature work sitting deep in the listing is looked up from the
