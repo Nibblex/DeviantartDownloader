@@ -29,8 +29,9 @@ def _quit_before_download() -> None:
     sys.exit(130)
 
 
-ONLY_FILTERS = ("images", "literature", "mature")
+ONLY_FILTERS = ("images", "literature", "mature", "ai", "no-ai")
 _KINDS = frozenset(("images", "literature"))
+_AI = frozenset(("ai", "no-ai"))
 
 
 def parse_only(values) -> frozenset[str]:
@@ -48,29 +49,74 @@ def parse_only(values) -> frozenset[str]:
     return chosen
 
 
+def _selectors(only) -> frozenset[str]:
+    """The --only selection as a set, for whatever a caller passed.
+
+    A bare string would iterate as its characters and quietly filter nothing.
+    """
+    if not only:
+        return frozenset()
+    return frozenset([only]) if isinstance(only, str) else frozenset(only)
+
+
+def _chosen(only: frozenset[str], axis: frozenset[str]) -> str | None:
+    """The single value of a two-value axis that `only` narrows to.
+
+    None when the selection names both values or neither, which is the same
+    thing: an axis whose two values are both wanted filters nothing.
+    """
+    chosen = only & axis
+    return next(iter(chosen)) if len(chosen) == 1 else None
+
+
 def filter_by_content(deviations: list[dict],
                       only: frozenset[str] | None) -> tuple[list[dict], int]:
     """Keep the works matching everything `only` asks for. Returns (kept, dropped).
 
-    The selectors sit on two axes, so they combine the way filters usually do:
+    The selectors sit on three axes, so they combine the way filters usually do:
     a union within an axis, an intersection across them. "images" and
     "literature" are the two values of what kind of work it is, so naming both
     is the same as naming neither; "mature" is a separate axis and narrows
     whatever the kind left, which is what makes `--only literature mature` mean
-    the mature literature rather than everything that is either.
+    the mature literature rather than everything that is either. "ai" and
+    "no-ai" are the two values of a third axis, so naming both is again the
+    same as naming neither.
     """
+    only = _selectors(only)
     if not only:
         return deviations, 0
-    # A bare string would iterate as characters and quietly filter nothing.
-    only = frozenset([only]) if isinstance(only, str) else frozenset(only)
     kept = deviations
-    kinds = only & _KINDS
-    if len(kinds) == 1:
-        want_text = "literature" in kinds
+    if kind := _chosen(only, _KINDS):
+        want_text = kind == "literature"
         kept = [d for d in kept if is_text_work(d) == want_text]
     if "mature" in only:
         kept = [d for d in kept if d.get("is_mature")]
+    if ai := _chosen(only, _AI):
+        # Only the website listing reports this, so the flag is None for works
+        # listed through the API. The two selectors are deliberately not mirror
+        # images of each other there: "ai" asks for the works known to be
+        # AI-made, while "no-ai" keeps what is not known to be, rather than
+        # discarding a work over a fact the listing never carried.
+        want_ai = ai == "ai"
+        kept = [d for d in kept if (d.get("is_ai_generated") is True) == want_ai]
     return kept, len(deviations) - len(kept)
+
+
+def ai_axis_warning(only: frozenset[str] | None, from_web: bool) -> str | None:
+    """Say that the AI selectors have no data, when the API did the listing.
+
+    The AI declaration rides on the website listing alone, so selecting on it
+    against an API listing silently means "nothing" (for `ai`) or "everything"
+    (for `no-ai`) rather than what was asked for. Returns None when there is
+    nothing to warn about.
+    """
+    selector = _chosen(_selectors(only), _AI)
+    if from_web or selector is None:
+        return None
+    outcome = "matches no work" if selector == "ai" else "drops no work"
+    return ("  WARNING: the API listing does not report whether a work is "
+            f"AI-generated, so --only {selector} has nothing to select on and "
+            f"{outcome} here.")
 
 
 def human_size(nbytes: float) -> str:
@@ -274,6 +320,8 @@ def sync_gallery(
             _quit_before_download()
         if not deviations:
             return None
+        if (warning := ai_axis_warning(only, from_web)):
+            print(warning)
         deviations, dropped = filter_by_content(deviations, only)
         if dropped:
             say(f"  Content filter (--only {' '.join(sorted(only))}): skipped "

@@ -73,6 +73,61 @@ class TestOnlySelectors:
         assert kept == [self.LIT, self.MAT_LIT]
 
 
+class TestAiSelectors:
+    """The third axis: what the website's own "Suppress AI" filter reads."""
+
+    AI = {"content": {"src": "x"}, "is_ai_generated": True}
+    HUMAN = {"content": {"src": "x"}, "is_ai_generated": False}
+    AI_LIT = {"type": "literature", "content": None, "is_ai_generated": True}
+    UNKNOWN = {"content": {"src": "x"}, "is_ai_generated": None}   # API listing
+    ALL = [AI, HUMAN, AI_LIT, UNKNOWN]
+
+    def keep(self, *selectors):
+        kept, _ = sync.filter_by_content(self.ALL, frozenset(selectors))
+        return kept
+
+    def test_ai_takes_only_the_works_known_to_be_ai_made(self):
+        assert self.keep("ai") == [self.AI, self.AI_LIT]
+
+    def test_no_ai_keeps_what_is_not_known_to_be_ai_made(self):
+        # The unknown is kept: dropping it would act on a fact the listing
+        # never carried.
+        assert self.keep("no-ai") == [self.HUMAN, self.UNKNOWN]
+
+    def test_naming_both_values_is_the_same_as_naming_neither(self):
+        assert self.keep("ai", "no-ai") == self.ALL
+
+    def test_the_ai_axis_intersects_with_the_kind(self):
+        assert self.keep("ai", "images") == [self.AI]
+        assert self.keep("ai", "literature") == [self.AI_LIT]
+
+    def test_a_work_without_the_field_at_all_counts_as_unknown(self):
+        kept, dropped = sync.filter_by_content([{"content": {"src": "x"}}],
+                                               frozenset({"ai"}))
+        assert kept == [] and dropped == 1
+
+
+class TestAiAxisWarning:
+    def test_the_website_listing_needs_no_warning(self):
+        assert sync.ai_axis_warning(frozenset({"ai"}), True) is None
+
+    def test_an_api_listing_says_ai_matches_nothing(self):
+        warning = sync.ai_axis_warning(frozenset({"ai"}), False)
+        assert "--only ai" in warning and "matches no work" in warning
+
+    def test_an_api_listing_says_no_ai_drops_nothing(self):
+        warning = sync.ai_axis_warning(frozenset({"no-ai"}), False)
+        assert "--only no-ai" in warning and "drops no work" in warning
+
+    @pytest.mark.parametrize("only", [
+        None,                             # no --only at all
+        frozenset({"mature"}),            # another axis entirely
+        frozenset({"ai", "no-ai"}),       # both values: filters nothing anyway
+    ])
+    def test_nothing_to_warn_about(self, only):
+        assert sync.ai_axis_warning(only, False) is None
+
+
 class TestParseOnly:
     def test_repeated_words_and_commas_both_work(self):
         for given in (["literature", "mature"], ["literature,mature"],
@@ -82,6 +137,9 @@ class TestParseOnly:
     def test_nothing_selected_is_no_filter(self):
         assert sync.parse_only([""]) == frozenset()
         assert sync.parse_only(None) == frozenset()
+
+    def test_the_ai_selectors_are_accepted(self):
+        assert sync.parse_only(["no-ai,images"]) == frozenset({"no-ai", "images"})
 
     def test_an_unknown_selector_is_rejected_by_name(self):
         with pytest.raises(SystemExit, match="not: sfw"):

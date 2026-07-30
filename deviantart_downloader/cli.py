@@ -114,7 +114,11 @@ def run():
                              "'images' and 'literature' are the two kinds of work, so "
                              "naming both is the same as naming neither, while 'mature' "
                              "narrows whatever the kind left -- '--only literature mature' "
-                             "is the mature literature. Also DA_ONLY in .env")
+                             "is the mature literature. 'ai' and 'no-ai' are a third axis, "
+                             "the website's own AI declaration (DreamUp works included); "
+                             "only the website listing carries it, so 'ai' takes the works "
+                             "known to be AI-made while 'no-ai' keeps everything not known "
+                             "to be. Also DA_ONLY in .env")
     parser.add_argument("--redownload-blurred", action="store_true",
                         help="Fetch again the mature works whose local copy may be "
                              "the blurred placeholder a logged-out run settled "

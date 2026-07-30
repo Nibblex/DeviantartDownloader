@@ -164,11 +164,23 @@ def web_media_url(media: dict) -> str | None:
     return url
 
 
+def _tristate(item: dict, *keys: str) -> bool | None:
+    """True when any of `keys` is set, None when the listing carries none of them.
+
+    These flags only exist on the website route, and the API has no equivalent,
+    so their absence means "not known" rather than "no". Reporting a missing
+    flag as False would state as fact something the listing never said.
+    """
+    present = [item[k] for k in keys if k in item]
+    return any(bool(v) for v in present) if present else None
+
+
 def normalize_web_deviation(item: dict) -> dict:
     """Translate a website listing entry into the shape the API returns.
 
     Only the fields the downloader actually reads are mapped, plus the block
-    information that decides which route a work takes.
+    information that decides which route a work takes and what the website
+    knows about AI involvement, which the API never reports.
     """
     media = item.get("media") or {}
     src = web_media_url(media) if item.get("type") == "image" else None
@@ -182,6 +194,11 @@ def normalize_web_deviation(item: dict) -> dict:
         "is_downloadable": bool(item.get("isDownloadable")),
         "is_blocked": bool(item.get("isBlocked")),
         "block_reasons": list(item.get("blockReasons") or []),
+        # What "Suppress AI" filters on: works the author declared as AI-made
+        # and works made with DreamUp, the website's own generator.
+        "is_ai_generated": _tristate(item, "isAiGenerated", "isDreamsofart"),
+        "is_upscaled": _tristate(item, "isUpscaled"),
+        "is_ai_use_disallowed": _tristate(item, "isAiUseDisallowed"),
         "content": {"src": src} if src else None,
         "excerpt": (item.get("textContent") or {}).get("excerpt"),
         "_source": WEB_SUBDIR,

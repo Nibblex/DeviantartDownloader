@@ -201,6 +201,10 @@ def web_item(**overrides):
         "isMature": False,
         "isBlocked": False,
         "isDownloadable": False,
+        "isAiGenerated": False,
+        "isDreamsofart": False,
+        "isUpscaled": False,
+        "isAiUseDisallowed": False,
         "blockReasons": [],
         "media": {
             "baseUri": BASE_URI,

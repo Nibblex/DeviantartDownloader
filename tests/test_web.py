@@ -63,6 +63,32 @@ class TestNormalizeWebDeviation:
         assert dev["is_blocked"] is True
         assert dev["block_reasons"] == ["mature_filter", "mature_loggedout"]
 
+    def test_records_the_ai_flags(self):
+        dev = web_mod.normalize_web_deviation(web_item())
+        assert dev["is_ai_generated"] is False
+        assert dev["is_upscaled"] is False
+        assert dev["is_ai_use_disallowed"] is False
+
+    @pytest.mark.parametrize("flag", ["isAiGenerated", "isDreamsofart"])
+    def test_either_ai_claim_marks_the_work(self, flag):
+        dev = web_mod.normalize_web_deviation(web_item(**{flag: True}))
+        assert dev["is_ai_generated"] is True
+
+    def test_ai_flags_the_listing_omits_are_unknown(self):
+        item = web_item()
+        for key in ("isAiGenerated", "isDreamsofart", "isUpscaled",
+                    "isAiUseDisallowed"):
+            del item[key]
+        dev = web_mod.normalize_web_deviation(item)
+        assert dev["is_ai_generated"] is None
+        assert dev["is_upscaled"] is None
+        assert dev["is_ai_use_disallowed"] is None
+
+    def test_one_ai_claim_alone_still_decides(self):
+        item = web_item(isDreamsofart=True)
+        del item["isAiGenerated"]
+        assert web_mod.normalize_web_deviation(item)["is_ai_generated"] is True
+
 
 class TestNeedsApi:
     def test_plain_web_work_stays_on_the_website(self):
