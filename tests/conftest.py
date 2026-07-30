@@ -21,6 +21,11 @@ from deviantart_downloader.constants import CANCEL, RESUME, VERBOSE
 
 DEV_ID = "abcd1234-5678-90ab-cdef-1234567890ab"
 
+# The routes report different ids for one and the same user: the website a
+# numeric one, the API a UUID.
+API_USER_ID = "A1E85B4E-45F7-E3DF-5FAB-EAA832EBFAB6"
+WEB_USER_ID = 233267
+
 WEB_ID = 1004952679
 WEB_URL = f"https://www.deviantart.com/artist/art/Web-Art-{WEB_ID}"
 BASE_URI = "https://images-wixmp-abc.wixmp.com/f/uuid/file.jpg"
@@ -186,6 +191,7 @@ def make_dev(**overrides):
         "deviationid": DEV_ID,
         "title": "My Art",
         "content": {"src": "https://example.com/pic.png"},
+        "author": {"userid": API_USER_ID, "username": "artist"},
     }
     dev.update(overrides)
     return dev
@@ -206,6 +212,7 @@ def web_item(**overrides):
         "isUpscaled": False,
         "isAiUseDisallowed": False,
         "blockReasons": [],
+        "author": {"userId": WEB_USER_ID, "username": "artist"},
         "media": {
             "baseUri": BASE_URI,
             "prettyName": "web_art_by_artist_dxxxxxx",
@@ -262,7 +269,8 @@ def clean_cli_env(tmp_path, monkeypatch):
     # happens to have logged in.
     monkeypatch.setattr(DeviantArtClient, "user_mode", property(lambda self: False))
     for var in ("DA_CLIENT_ID", "DA_CLIENT_SECRET", "DA_WORKERS", "DA_UNBLUR",
-                "DA_OUTPUT", "DA_FORCE_API", "DA_QUIET"):
+                "DA_OUTPUT", "DA_FORCE_API", "DA_QUIET", "DA_ONLY",
+                "DA_LITERATURE_FORMAT", "DA_USER_CONFIG"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 

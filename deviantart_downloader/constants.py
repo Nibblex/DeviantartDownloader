@@ -34,6 +34,9 @@ BROWSER_USER_AGENT = (
 WEB_SUBDIR = "web"
 API_SUBDIR = "api"
 
+# The formats a text work can be saved in (see --literature-format).
+TEXT_FORMATS = ("txt", "html")
+
 class CancelledByUser(RuntimeError):
     """A blocking wait was aborted because the user asked to stop (q / Ctrl+C).
 

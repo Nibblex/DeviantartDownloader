@@ -5,8 +5,8 @@ import pytest
 from deviantart_downloader import web as web_mod
 from deviantart_downloader.constants import CANCEL, WEB_SUBDIR, CancelledByUser
 
-from .conftest import (BASE_URI, WEB_ID, WEB_URL, FakeResponse, FakeSession, csrf_page,
-                       blocked_web_item, make_dev, web_item)
+from .conftest import (BASE_URI, WEB_ID, WEB_URL, WEB_USER_ID, FakeResponse,
+                       FakeSession, csrf_page, blocked_web_item, make_dev, web_item)
 
 
 class TestWebMediaUrl:
@@ -62,6 +62,12 @@ class TestNormalizeWebDeviation:
         dev = web_mod.normalize_web_deviation(blocked_web_item())
         assert dev["is_blocked"] is True
         assert dev["block_reasons"] == ["mature_filter", "mature_loggedout"]
+
+    def test_keeps_the_author_the_website_reports(self):
+        dev = web_mod.normalize_web_deviation(web_item())
+        # The website's numeric id, which is not the UUID the API reports for
+        # the same user; per-user settings match on it to survive a rename.
+        assert dev["author"] == {"username": "artist", "userid": WEB_USER_ID}
 
     def test_records_the_ai_flags(self):
         dev = web_mod.normalize_web_deviation(web_item())

@@ -5,10 +5,10 @@ import json
 
 import pytest
 
-from deviantart_downloader import api, cli, downloads, listing, sync
+from deviantart_downloader import api, cli, downloads, listing, overrides, sync
 from deviantart_downloader.constants import CANCEL, CancelledByUser
 
-from .conftest import (BASE_URI, DEV_ID, FakeClient, FakeWebClient,
+from .conftest import (BASE_URI, DEV_ID, WEB_USER_ID, FakeClient, FakeWebClient,
                        blocked_web_item, fake_download, make_dev, make_user_dir,
                        set_argv, web_item)
 
@@ -398,6 +398,137 @@ class TestRun:
                  "--client-secret", "y", flag)
         cli.run()
         assert seen["full"] is True
+
+
+class TestPerUserSettings:
+    """The settings file, driving a real run one user at a time."""
+
+    POEM_ID = 1260299235
+
+    def gallery(self, monkeypatch):
+        """A gallery of one image and one poem, over the website route."""
+        lit = web_item(
+            deviationId=self.POEM_ID, title="My Poem", type="literature",
+            url=f"https://www.deviantart.com/artist/art/My-Poem-{self.POEM_ID}")
+        body = json.dumps({"document": {"content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Poem"}]}]}})
+        web = FakeWebClient(
+            pages=[{"results": [web_item(), lit], "hasMore": False}],
+            texts={str(self.POEM_ID): {"html": {"type": "tiptap", "markup": body}}})
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+
+    def settings(self, out, entries, name=None):
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / (name or overrides.FILENAME)
+        path.write_text(json.dumps(entries), encoding="utf-8")
+        return path
+
+    def run(self, monkeypatch, out, *extra):
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "-w", "1", *extra)
+        cli.run()
+
+    def test_the_file_narrows_one_user_where_the_run_asked_for_everything(
+            self, clean_cli_env, monkeypatch, capsys):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        self.settings(out, {"artist": {"only": "literature"}})
+        self.run(monkeypatch, out)
+
+        web_dir = out / "artist" / "web"
+        assert (web_dir / f"My Poem_{self.POEM_ID}.txt").is_file()
+        assert not list(web_dir.glob("*.jpg"))
+        assert "_users.json: --only literature" in capsys.readouterr().out
+
+    def test_the_file_picks_the_literature_format(self, clean_cli_env, monkeypatch):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        self.settings(out, {"artist": {"literature-format": "html"}})
+        self.run(monkeypatch, out)
+        assert (out / "artist" / "web" / f"My Poem_{self.POEM_ID}.html").is_file()
+
+    def test_a_file_elsewhere_is_read_when_named(self, clean_cli_env, monkeypatch):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        path = self.settings(clean_cli_env, {"artist": {"only": "literature"}},
+                             name="mine.json")
+        self.run(monkeypatch, out, "--user-config", str(path))
+        assert not list((out / "artist" / "web").glob("*.jpg"))
+
+    def test_a_user_the_file_leaves_alone_keeps_the_command_line(
+            self, clean_cli_env, monkeypatch):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        self.settings(out, {"someone-else": {"only": "literature"}})
+        self.run(monkeypatch, out, "--only", "images")
+        # The run-wide --only still decides for everyone unnamed.
+        assert (out / "artist" / "web" / "Web Art_1004952679.jpg").is_file()
+        assert not list((out / "artist" / "web").glob("*.txt"))
+
+    def test_the_flag_given_for_the_run_outranks_the_file(self, clean_cli_env,
+                                                          monkeypatch, capsys):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        self.settings(out, {"artist": {"only": "literature"}})
+        self.run(monkeypatch, out, "--only", "images")
+
+        assert (out / "artist" / "web" / "Web Art_1004952679.jpg").is_file()
+        assert not list((out / "artist" / "web").glob("*.txt"))
+        assert "--only given on the command line" in capsys.readouterr().out
+
+    def test_the_setting_the_run_left_out_still_comes_from_the_file(
+            self, clean_cli_env, monkeypatch):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        self.settings(out, {"artist": {"only": "images",
+                                       "literature-format": "html"}})
+        # --only is settled here, so the file only gets to pick the format.
+        self.run(monkeypatch, out, "--only", "literature")
+        assert (out / "artist" / "web" / f"My Poem_{self.POEM_ID}.html").is_file()
+
+    def test_the_env_default_does_not_outrank_the_file(self, clean_cli_env,
+                                                      monkeypatch):
+        self.gallery(monkeypatch)
+        monkeypatch.setenv("DA_ONLY", "images")
+        out = clean_cli_env / "out"
+        self.settings(out, {"artist": {"only": "literature"}})
+        self.run(monkeypatch, out)
+        # DA_ONLY is a standing default, not this run's decision.
+        assert (out / "artist" / "web" / f"My Poem_{self.POEM_ID}.txt").is_file()
+        assert not list((out / "artist" / "web").glob("*.jpg"))
+
+    def test_a_renamed_user_keeps_their_settings(self, clean_cli_env, monkeypatch,
+                                                 capsys):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        # Written when the user still went by "oldname", id and all.
+        path = self.settings(out, {"oldname": {"only": "literature",
+                                              "ids": {"web": str(WEB_USER_ID)}}})
+        self.run(monkeypatch, out)
+
+        assert (out / "artist" / "web" / f"My Poem_{self.POEM_ID}.txt").is_file()
+        assert not list((out / "artist" / "web").glob("*.jpg"))
+        assert '"oldname" is now "artist"' in capsys.readouterr().out
+        assert "artist" in json.loads(path.read_text(encoding="utf-8"))
+
+    def test_the_id_is_recorded_so_a_later_rename_is_recognised(
+            self, clean_cli_env, monkeypatch):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        path = self.settings(out, {"artist": {"only": "literature"}})
+        self.run(monkeypatch, out)
+        entries = json.loads(path.read_text(encoding="utf-8"))
+        assert entries["artist"]["ids"] == {"web": str(WEB_USER_ID)}
+
+    def test_a_broken_file_stops_the_run_before_anything_is_downloaded(
+            self, clean_cli_env, monkeypatch):
+        self.gallery(monkeypatch)
+        out = clean_cli_env / "out"
+        self.settings(out, {"artist": {"only": "sfw"}})
+        with pytest.raises(SystemExit, match="asks --only for sfw"):
+            self.run(monkeypatch, out)
+        assert not (out / "artist").exists()
 
 
 class TestDiscoverUsers:

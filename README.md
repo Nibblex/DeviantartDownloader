@@ -19,7 +19,7 @@ Works are fetched through two routes, so the API quota is spent only on what the
 Each route saves to its own subfolder inside the gallery folder. `--force-api` restores the old behaviour of routing everything through the [official API](https://www.deviantart.com/developers/).
 
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
-- Downloads literature and journals too: text works have no media file, so their full body is saved next to the images as plain text (`.txt`) or a standalone HTML document (`.html`), your choice with `--literature-format`. The body is fetched from the website for no API quota, falling back to the listing excerpt when it is unavailable. Restrict a run with `--only`, which takes `images`, `literature`, `mature`, `ai` and `no-ai`, repeated or comma-separated.
+- Downloads literature and journals too: text works have no media file, so their full body is saved next to the images as plain text (`.txt`) or a standalone HTML document (`.html`), your choice with `--literature-format`. The body is fetched from the website for no API quota, falling back to the listing excerpt when it is unavailable. Restrict a run with `--only`, which takes `images`, `literature`, `mature`, `ai`, `no-ai`, `upscaled` and `no-upscaled`, repeated or comma-separated, and set either flag per user in a `_users.json` that survives a rename (see below).
 - Downloads mature content unblurred when you log in with your account (`--login`, see below). Without login, `--unblur`/`DA_UNBLUR=true` strips the blur where possible: works uploaded since ~mid-2021 have their URL token pinned to the blurred version, so for those the blurred preview is downloaded instead.
 - Parallel downloads with retries and API rate-limit handling: every worker draws from one shared budget (`DA_API_RATE`, 3 requests/second by default), and a 429 holds the whole pool back instead of each thread backing off on its own. The website route needs no OAuth call at all, so a re-sync of an all-ages gallery costs zero API requests.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
@@ -63,8 +63,11 @@ DA_UNBLUR=false
 # "html" (a standalone document that keeps the formatting) (default: txt)
 DA_LITERATURE_FORMAT=txt
 # Optional: keep only the works matching all of images, literature, mature,
-# ai, no-ai (default: unset, which keeps everything); comma-separate to combine
+# ai, no-ai, upscaled, no-upscaled (default: unset, keeps everything)
 DA_ONLY=
+# Optional: per-user --only / --literature-format file (default: _users.json in
+# the output folder, if it exists)
+DA_USER_CONFIG=
 # Optional: output folder, absolute or relative ("~" is expanded)
 DA_OUTPUT=~/Pictures/deviantart
 # Optional: route every work through the API instead of the website listing
@@ -110,7 +113,14 @@ deviantart-downloader test --info     # inspect it first: profile + gallery coun
 deviantart-downloader test -o demo     # download all 18 works into ./demo/test/
 ```
 
-`--only` narrows a run to the works you actually want. Its selectors sit on three axes and combine the way filters usually do — a union within an axis, an intersection across them:
+`--only` narrows a run to the works you actually want. Its selectors sit on four axes and combine the way filters usually do — a union within an axis, an intersection across them:
+
+| Axis | Selectors |
+| --- | --- |
+| What kind of work it is | `images`, `literature` |
+| Maturity | `mature` |
+| The author's AI declaration | `ai`, `no-ai` |
+| Upscaled with AI | `upscaled`, `no-upscaled` |
 
 | Command | Keeps |
 | --- | --- |
@@ -121,10 +131,70 @@ deviantart-downloader test -o demo     # download all 18 works into ./demo/test/
 | `--only images literature` | Everything — the two kinds are one axis, so naming both restricts nothing |
 | `--only no-ai` | What the site's own "Suppress AI" filter would leave |
 | `--only ai images` | The AI-made images only |
+| `--only no-ai no-upscaled` | Neither AI-made nor AI-upscaled |
 
 `mature` reads the flag the listing carries. Note that a handful of works are served blurred without carrying it, and those are not selected by it.
 
-`ai` / `no-ai` read the same declaration the website's "Suppress AI" setting filters on, DreamUp works included. Only the website listing carries it, so the two are not mirror images of each other: `ai` keeps the works *known* to be AI-made, while `no-ai` keeps everything not known to be, rather than dropping a work over a fact the listing never reported. When the API ends up doing the listing (`--api-only`, or the website route being unavailable) nothing at all is known, and the run says so instead of quietly selecting everything or nothing.
+The last two axes are separate declarations, not degrees of one: `ai` / `no-ai` read what the website's "Suppress AI" setting filters on (DreamUp works included), while `upscaled` / `no-upscaled` read whether the author ran the work through an AI upscaler. A hand-drawn piece upscaled that way is *not* AI-made, so `--only no-ai` keeps it and only `--only no-upscaled` turns it away.
+
+Only the website listing carries either one, which is what makes each pair lopsided rather than mirrored: the plain value keeps the works *known* to be that way, while the `no-` one keeps everything not known to be, rather than dropping a work over a fact the listing never reported. When the API ends up doing the listing (`--force-api`, or the website route being unavailable) nothing at all is known, and the run says so, one line per axis, instead of quietly selecting everything or nothing:
+
+```
+WARNING: the API listing does not report whether a work was upscaled with AI, so --only upscaled has nothing to select on and matches no work here.
+```
+
+### Different settings per user
+
+`--only` and `--literature-format` apply to the whole run, which is the wrong shape for a folder full of galleries that want different things: one artist worth only their images, another followed for the literature. A `_users.json` in the output folder gives a user their own answer:
+
+```json
+{
+  "someartist": { "only": "images, no-ai" },
+  "aWriter":    { "only": "literature", "literature-format": "html" },
+  "everything": { "only": "" }
+}
+```
+
+Selectors read exactly as they do on the command line — one string or a list, spaces or commas — and an empty `only` means everything for that user. Usernames are matched whatever their case, and `literature_format` is accepted alongside `literature-format`.
+
+**A flag you type outranks the file**, which was written before this run. Highest wins:
+
+| | Decides | Scope |
+| --- | --- | --- |
+| 1 | `--only` / `--literature-format` on the command line | every user in the run |
+| 2 | that user's entry in `_users.json` | one user |
+| 3 | `DA_ONLY` / `DA_LITERATURE_FORMAT` in `.env` | every user, as a standing default |
+| 4 | the built-in default (everything, `txt`) | every user |
+
+So `--only images` with the file above downloads only images from `aWriter` too, and says which setting the file lost:
+
+```
+--only given on the command line, which settles it for every user: _users.json does not get a say in that.
+```
+
+One flag settles one setting: pass `--only images` and the file still picks each user's `literature-format`. The `.env` variables sit *below* the file rather than above it, because they are a standing default rather than a decision about this run — `DA_ONLY=images` with the file above still gets `aWriter`'s literature.
+
+The file is read before the first user is synced, so a typo in it stops the run there instead of halfway through a batch — including in a setting this run overrides, which is wrong today and would bite the first run that leaves the flag off:
+
+```
+_users.json: "someartist" asks --only for sfw, which is not among images, literature, mature, ai, no-ai, upscaled, no-upscaled.
+```
+
+Point somewhere else with `--user-config PATH` (or `DA_USER_CONFIG`); a file named that way and not found is an error, while the default location simply has nothing to say when there is no file in it.
+
+**A rename does not invalidate it.** DeviantArt lets people change their username, and an entry filed under a name nobody answers to any more would quietly stop applying. So each entry records the id the route reports for that user — the one thing a rename does not change — and a run that meets that id under a new name moves the entry across:
+
+```
+_users.json: "oldname" is now "newname"; moving those settings over.
+```
+
+The ids are written by the tool, not by hand, and appear the first time a user is synced. Note the two routes disagree about user ids (the website reports a numeric one, the API a UUID, and for the same user they differ), so each is kept under the name of the route that reported it and neither is ever read as the other:
+
+```json
+{ "newname": { "only": "literature", "ids": { "web": "233267" } } }
+```
+
+The gallery folder is still named after the username, so a renamed user's older files stay in the folder under the old name; only the settings follow the rename.
 
 Pass `-q/--quiet` (or `DA_QUIET=true`) when the progress is more noise than signal — a long sync prints one line per work, and `--watching` multiplies that by every user you follow. It drops the lines for works that *succeeded*; summaries, the works that failed, warnings, errors and the `--watching` confirmation still print, so a quiet run still tells you what happened and what went wrong. On the demo profile below that is 34 lines of output against 8. It layers on anything else: `--watching -q`, `--info -q`, `--only images -q`.
 
@@ -316,6 +386,7 @@ The package is layered bottom-up, each module depending only on the ones above i
 | `listing.py` | Walking a gallery over either route, and pairing the two up |
 | `downloads.py` | Resolving a work to a file (or text) and writing it to disk |
 | `sync.py` | Orchestration: list, route, download |
+| `overrides.py` | `_users.json`: per-user `--only` / `--literature-format`, rename-proof |
 | `cli.py` | Argument parsing and the entry point |
 
 The test suite mirrors that layout (`tests/test_<module>.py`), with the fakes and factories in `tests/conftest.py`.

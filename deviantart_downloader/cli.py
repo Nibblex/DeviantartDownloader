@@ -8,9 +8,10 @@ from pathlib import Path
 from .api import UNREADABLE_PROFILE, ApiError, DeviantArtClient
 from .auth import login
 from .config import env_bool, env_choice, env_float, env_int, load_dotenv
-from .constants import API_RATE, VERBOSE, CancelledByUser, say
+from .constants import API_RATE, TEXT_FORMATS, VERBOSE, CancelledByUser, say
 from .listing import GalleryNotFoundError
 from .naming import extract_username, profile_label
+from .overrides import FILENAME, FORMAT, ONLY, load_overrides
 from .profile import print_profiles
 from .sync import (ONLY_FILTERS, add_stats, discover_users, fetch_watching,
                    human_size, new_stats, parse_only, summary_lines,
@@ -101,24 +102,40 @@ def run():
                         default=env_bool("DA_UNBLUR", False),
                         help="Strip the blur filter the API applies to mature-content "
                              "previews (default: keep the blur, or DA_UNBLUR from .env)")
-    parser.add_argument("--literature-format", choices=["txt", "html"],
-                        default=env_choice("DA_LITERATURE_FORMAT", "txt", ("txt", "html")),
+    # Both of these are left without a default so that "given on the command
+    # line" stays distinguishable from "not given": what the flag decides is
+    # everyone's, and outranks the per-user file, while the .env fallback below
+    # is only a standing default and does not.
+    parser.add_argument("--literature-format", choices=list(TEXT_FORMATS),
                         help="File format for literature and journals, which have no "
                              "media file (default: DA_LITERATURE_FORMAT from .env or "
                              "'txt'). 'txt' saves the plain text; 'html' saves a "
                              "standalone HTML document that keeps the formatting")
     parser.add_argument("--only", nargs="+", metavar="WHAT",
-                        default=[os.environ.get("DA_ONLY", "")],
                         help=f"Keep only the works matching all of {', '.join(ONLY_FILTERS)} "
                              "(default: everything). Repeat or comma-separate them: "
                              "'images' and 'literature' are the two kinds of work, so "
                              "naming both is the same as naming neither, while 'mature' "
                              "narrows whatever the kind left -- '--only literature mature' "
-                             "is the mature literature. 'ai' and 'no-ai' are a third axis, "
-                             "the website's own AI declaration (DreamUp works included); "
-                             "only the website listing carries it, so 'ai' takes the works "
-                             "known to be AI-made while 'no-ai' keeps everything not known "
-                             "to be. Also DA_ONLY in .env")
+                             "is the mature literature. 'ai'/'no-ai' and "
+                             "'upscaled'/'no-upscaled' are two more axes, the website's own "
+                             "AI declarations (DreamUp counts as AI-made, and an upscale is "
+                             "not an AI-made work); only the website listing carries them, "
+                             "so the plain value takes the works known to be that way while "
+                             "the 'no-' one keeps everything not known to be. Also DA_ONLY "
+                             "in .env")
+    parser.add_argument("--user-config", metavar="PATH",
+                        default=os.environ.get("DA_USER_CONFIG", "").strip() or None,
+                        help=f"Per-user settings file: a JSON object naming a "
+                             f"username and the --only and --literature-format to "
+                             f"sync them with, for that user alone (default: "
+                             f"{FILENAME} in the output folder, if it exists; also "
+                             "DA_USER_CONFIG in .env). Either flag given above "
+                             "outranks it and settles that setting for everyone, so "
+                             "the file has the say on whatever this run leaves out. "
+                             "Renames are followed: each entry records the id the "
+                             "route reports for that user, so the settings move to "
+                             "the new name instead of being lost")
     parser.add_argument("--redownload-blurred", action="store_true",
                         help="Fetch again the mature works whose local copy may be "
                              "the blurred placeholder a logged-out run settled "
@@ -144,7 +161,16 @@ def run():
     if args.quiet:
         VERBOSE.clear()
 
-    only = parse_only(args.only)
+    # A flag given for this run settles its setting for every user: the per-user
+    # file may not touch it. Not passing it leaves .env, and then the built-in
+    # default, as a fallback the file is free to override.
+    locked = frozenset(name for name, given in ((ONLY, args.only),
+                                                (FORMAT, args.literature_format))
+                       if given is not None)
+    only = parse_only(args.only if args.only is not None
+                      else [os.environ.get("DA_ONLY", "")])
+    text_format = args.literature_format or env_choice("DA_LITERATURE_FORMAT",
+                                                       "txt", TEXT_FORMATS)
 
     if args.web_workers < 1:
         sys.exit(f"The number of web workers must be at least 1 (got: {args.web_workers}).")
@@ -183,6 +209,13 @@ def run():
             return  # login-only invocation
 
     output_root = Path(args.output).expanduser()
+    # Read before anything is fetched, so a typo in it is heard about before a
+    # watchlist is walked or a single work downloaded.
+    overrides = load_overrides(args.user_config, output_root, locked)
+    if shadowed := overrides.shadowed():
+        flags = ", ".join(f"--{name}" for name in sorted(shadowed))
+        say(f"{flags} given on the command line, which settles it for every user: "
+            f"{overrides.path.name} does not get a say in that.")
     # One profile asked for by name fails loudly when it turns out to be gone;
     # every batch source skips the dead ones and carries on. Both loops below
     # read this rather than each re-deriving it from a different flag.
@@ -253,7 +286,8 @@ def run():
                 redownload_missing=args.redownload_missing, unblur=args.unblur,
                 redownload_blurred=args.redownload_blurred,
                 full=args.full, web=web, gallery=args.gallery,
-                text_format=args.literature_format, only=only,
+                text_format=text_format, only=only,
+                overrides=overrides,
             )
         except UNREADABLE_PROFILE as e:
             # A batch outlives the accounts in it. Whichever call found out this

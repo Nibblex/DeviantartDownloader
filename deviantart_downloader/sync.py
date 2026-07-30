@@ -4,6 +4,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 from .api import DeviantArtClient
 from .constants import API_SUBDIR, CANCEL, WEB_SUBDIR, CancelledByUser, say
@@ -29,16 +30,51 @@ def _quit_before_download() -> None:
     sys.exit(130)
 
 
-ONLY_FILTERS = ("images", "literature", "mature", "ai", "no-ai")
-_KINDS = frozenset(("images", "literature"))
-_AI = frozenset(("ai", "no-ai"))
+class Axis(NamedTuple):
+    """One axis of --only: its selectors, and how a work answers them.
+
+    `reads` answers the question the first value asks -- is this an image, is it
+    mature -- so naming a value keeps the works that answer it that way, and
+    naming every value of an axis is the same as naming none: the axis then
+    filters nothing. An axis with a single value is the degenerate case of the
+    same rule, wanted or not mentioned.
+
+    `unreported` is what the API listing does not say about a work, for the
+    axes only the website reports; empty when both routes know the answer.
+    """
+    values: tuple[str, ...]
+    reads: Callable[[dict], bool]
+    unreported: str = ""
+
+
+AXES = (
+    Axis(("images", "literature"), lambda dev: not is_text_work(dev)),
+    Axis(("mature",), lambda dev: bool(dev.get("is_mature"))),
+    # These two ride on the website listing alone, and the API has no
+    # equivalent, so their flag is None -- not known -- on that route.
+    Axis(("ai", "no-ai"), lambda dev: dev.get("is_ai_generated") is True,
+         "whether a work is AI-generated"),
+    Axis(("upscaled", "no-upscaled"), lambda dev: dev.get("is_upscaled") is True,
+         "whether a work was upscaled with AI"),
+)
+
+ONLY_FILTERS = tuple(value for axis in AXES for value in axis.values)
+
+
+def only_tokens(values) -> frozenset[str]:
+    """The selector words in a --only value, however it was written.
+
+    Repeated words, comma-separated ones, or both; unknown words are left in,
+    for the caller to reject in the terms of wherever the value came from.
+    """
+    return frozenset(
+        token for value in values or ()
+        for token in str(value).lower().replace(",", " ").split() if token)
 
 
 def parse_only(values) -> frozenset[str]:
     """The --only selectors, given as repeated words, commas, or both."""
-    chosen = frozenset(
-        token for value in values or ()
-        for token in str(value).lower().replace(",", " ").split() if token)
+    chosen = only_tokens(values)
     unknown = sorted(chosen - frozenset(ONLY_FILTERS))
     if unknown:
         # --only reads every word after it, so a profile written behind it is
@@ -59,64 +95,74 @@ def _selectors(only) -> frozenset[str]:
     return frozenset([only]) if isinstance(only, str) else frozenset(only)
 
 
-def _chosen(only: frozenset[str], axis: frozenset[str]) -> str | None:
-    """The single value of a two-value axis that `only` narrows to.
+def _chosen(only: frozenset[str], axis: Axis) -> str | None:
+    """The single value of an axis that `only` narrows to.
 
-    None when the selection names both values or neither, which is the same
-    thing: an axis whose two values are both wanted filters nothing.
+    None when the selection names every value of the axis or none of them,
+    which is the same thing: an axis whose values are all wanted filters
+    nothing.
     """
-    chosen = only & axis
+    chosen = only & frozenset(axis.values)
     return next(iter(chosen)) if len(chosen) == 1 else None
+
+
+def _wants(axis: Axis, chosen: str) -> bool:
+    """What a work must read as, for this selector to keep it."""
+    return chosen == axis.values[0]
 
 
 def filter_by_content(deviations: list[dict],
                       only: frozenset[str] | None) -> tuple[list[dict], int]:
     """Keep the works matching everything `only` asks for. Returns (kept, dropped).
 
-    The selectors sit on three axes, so they combine the way filters usually do:
-    a union within an axis, an intersection across them. "images" and
-    "literature" are the two values of what kind of work it is, so naming both
-    is the same as naming neither; "mature" is a separate axis and narrows
-    whatever the kind left, which is what makes `--only literature mature` mean
-    the mature literature rather than everything that is either. "ai" and
-    "no-ai" are the two values of a third axis, so naming both is again the
-    same as naming neither.
+    The selectors sit on the axes of AXES, so they combine the way filters
+    usually do: a union within an axis, an intersection across them. "images"
+    and "literature" are the two values of what kind of work it is, so naming
+    both is the same as naming neither, while "mature" is a separate axis and
+    narrows whatever the kind left. That is what makes `--only literature mature`
+    mean the mature literature rather than everything that is either.
+
+    On the two axes only the website reports, a work whose flag never arrived
+    reads as False, which makes the selectors deliberately lopsided: "ai" asks
+    for the works known to be AI-made, while "no-ai" keeps what is not known to
+    be, rather than discarding a work over a fact the listing never carried.
     """
     only = _selectors(only)
     if not only:
         return deviations, 0
     kept = deviations
-    if kind := _chosen(only, _KINDS):
-        want_text = kind == "literature"
-        kept = [d for d in kept if is_text_work(d) == want_text]
-    if "mature" in only:
-        kept = [d for d in kept if d.get("is_mature")]
-    if ai := _chosen(only, _AI):
-        # Only the website listing reports this, so the flag is None for works
-        # listed through the API. The two selectors are deliberately not mirror
-        # images of each other there: "ai" asks for the works known to be
-        # AI-made, while "no-ai" keeps what is not known to be, rather than
-        # discarding a work over a fact the listing never carried.
-        want_ai = ai == "ai"
-        kept = [d for d in kept if (d.get("is_ai_generated") is True) == want_ai]
+    for axis in AXES:
+        if chosen := _chosen(only, axis):
+            wanted = _wants(axis, chosen)
+            kept = [d for d in kept if axis.reads(d) == wanted]
     return kept, len(deviations) - len(kept)
 
 
-def ai_axis_warning(only: frozenset[str] | None, from_web: bool) -> str | None:
-    """Say that the AI selectors have no data, when the API did the listing.
+def unreported_warnings(only: frozenset[str] | None,
+                        from_web: bool) -> list[str]:
+    """Say which selectors have no data, when the API did the listing.
 
-    The AI declaration rides on the website listing alone, so selecting on it
-    against an API listing silently means "nothing" (for `ai`) or "everything"
-    (for `no-ai`) rather than what was asked for. Returns None when there is
-    nothing to warn about.
+    Some axes ride on the website listing alone, so selecting on one against an
+    API listing silently means "nothing" or "everything" rather than what was
+    asked for; which of the two it is falls out of what the selector does with
+    a work the listing said nothing about. One line per axis, and none at all
+    when there is nothing to warn about.
     """
-    selector = _chosen(_selectors(only), _AI)
-    if from_web or selector is None:
-        return None
-    outcome = "matches no work" if selector == "ai" else "drops no work"
-    return ("  WARNING: the API listing does not report whether a work is "
-            f"AI-generated, so --only {selector} has nothing to select on and "
-            f"{outcome} here.")
+    if from_web:
+        return []
+    only = _selectors(only)
+    warnings = []
+    for axis in AXES:
+        chosen = _chosen(only, axis) if axis.unreported else None
+        if chosen is None:
+            continue
+        # {} is a work nothing is known about, which is every work on this route.
+        keeps_unknown = axis.reads({}) == _wants(axis, chosen)
+        outcome = "drops no work" if keeps_unknown else "matches no work"
+        warnings.append(
+            f"  WARNING: the API listing does not report {axis.unreported}, so "
+            f"--only {chosen} has nothing to select on and {outcome} here.")
+    return warnings
 
 
 def human_size(nbytes: float) -> str:
@@ -269,12 +315,18 @@ def sync_gallery(
     redownload_missing: bool, unblur: bool, redownload_blurred: bool = False,
     full: bool = False, web: WebClient | None = None, gallery: str | None = None,
     text_format: str = "txt", only: frozenset[str] | None = None,
+    overrides: "UserOverrides | None" = None,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
     or None when the gallery is empty.
 
     With a gallery name only that folder is downloaded instead of the whole
     gallery. Exits with code 130 if the user interrupts with Ctrl+C.
+
+    `only` and `text_format` are what the command line asked of every user;
+    `overrides` is the per-user settings file, which may replace either of them
+    for this one. It is consulted after the listing because that is what carries
+    the id it recognises a renamed user by.
 
     A profile that has gone since it was listed raises UserNotFoundError, from
     whichever call happens to discover it -- the gallery listing, the mature
@@ -320,7 +372,10 @@ def sync_gallery(
             _quit_before_download()
         if not deviations:
             return None
-        if (warning := ai_axis_warning(only, from_web)):
+        if overrides is not None:
+            only, text_format = overrides.for_user(username, deviations,
+                                                   only, text_format)
+        for warning in unreported_warnings(only, from_web):
             print(warning)
         deviations, dropped = filter_by_content(deviations, only)
         if dropped:

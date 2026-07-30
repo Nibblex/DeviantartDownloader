@@ -73,8 +73,24 @@ class TestOnlySelectors:
         assert kept == [self.LIT, self.MAT_LIT]
 
 
+class TestAxes:
+    """The table the selectors come from, rather than each axis in turn."""
+
+    def test_every_axis_value_is_a_selector(self):
+        assert sync.ONLY_FILTERS == ("images", "literature", "mature", "ai",
+                                     "no-ai", "upscaled", "no-upscaled")
+
+    def test_no_selector_belongs_to_two_axes(self):
+        # A word on two axes would be filtered twice and read as neither.
+        assert len(set(sync.ONLY_FILTERS)) == len(sync.ONLY_FILTERS)
+
+    def test_only_the_website_only_axes_carry_a_warning(self):
+        carried = {axis.values[0] for axis in sync.AXES if axis.unreported}
+        assert carried == {"ai", "upscaled"}
+
+
 class TestAiSelectors:
-    """The third axis: what the website's own "Suppress AI" filter reads."""
+    """What the website's own "Suppress AI" filter reads."""
 
     AI = {"content": {"src": "x"}, "is_ai_generated": True}
     HUMAN = {"content": {"src": "x"}, "is_ai_generated": False}
@@ -107,25 +123,68 @@ class TestAiSelectors:
         assert kept == [] and dropped == 1
 
 
-class TestAiAxisWarning:
+class TestUpscaledSelectors:
+    """The fourth axis: works the author declared upscaled with AI."""
+
+    UP = {"content": {"src": "x"}, "is_upscaled": True}
+    PLAIN = {"content": {"src": "x"}, "is_upscaled": False}
+    UP_LIT = {"type": "literature", "content": None, "is_upscaled": True}
+    UNKNOWN = {"content": {"src": "x"}, "is_upscaled": None}        # API listing
+    ALL = [UP, PLAIN, UP_LIT, UNKNOWN]
+
+    def keep(self, *selectors):
+        kept, _ = sync.filter_by_content(self.ALL, frozenset(selectors))
+        return kept
+
+    def test_upscaled_takes_only_the_works_known_to_be_upscaled(self):
+        assert self.keep("upscaled") == [self.UP, self.UP_LIT]
+
+    def test_no_upscaled_keeps_what_is_not_known_to_be(self):
+        assert self.keep("no-upscaled") == [self.PLAIN, self.UNKNOWN]
+
+    def test_naming_both_values_is_the_same_as_naming_neither(self):
+        assert self.keep("upscaled", "no-upscaled") == self.ALL
+
+    def test_it_is_its_own_axis_and_intersects_with_the_others(self):
+        assert self.keep("upscaled", "images") == [self.UP]
+
+    def test_an_upscaled_work_is_not_an_ai_generated_one(self):
+        # Different declarations: a hand-drawn work upscaled with AI is not
+        # AI-made, so the AI axis must not select it.
+        drawn = {"content": {"src": "x"}, "is_upscaled": True,
+                 "is_ai_generated": False}
+        assert sync.filter_by_content([drawn], frozenset({"ai"}))[0] == []
+        assert sync.filter_by_content([drawn], frozenset({"no-ai"}))[0] == [drawn]
+        assert sync.filter_by_content([drawn], frozenset({"upscaled"}))[0] == [drawn]
+
+
+class TestUnreportedWarnings:
     def test_the_website_listing_needs_no_warning(self):
-        assert sync.ai_axis_warning(frozenset({"ai"}), True) is None
+        assert sync.unreported_warnings(frozenset({"ai", "upscaled"}), True) == []
 
-    def test_an_api_listing_says_ai_matches_nothing(self):
-        warning = sync.ai_axis_warning(frozenset({"ai"}), False)
-        assert "--only ai" in warning and "matches no work" in warning
+    @pytest.mark.parametrize("selector", ["ai", "upscaled"])
+    def test_an_api_listing_says_the_positive_matches_nothing(self, selector):
+        warning, = sync.unreported_warnings(frozenset({selector}), False)
+        assert f"--only {selector}" in warning and "matches no work" in warning
 
-    def test_an_api_listing_says_no_ai_drops_nothing(self):
-        warning = sync.ai_axis_warning(frozenset({"no-ai"}), False)
-        assert "--only no-ai" in warning and "drops no work" in warning
+    @pytest.mark.parametrize("selector", ["no-ai", "no-upscaled"])
+    def test_an_api_listing_says_the_negative_drops_nothing(self, selector):
+        warning, = sync.unreported_warnings(frozenset({selector}), False)
+        assert f"--only {selector}" in warning and "drops no work" in warning
+
+    def test_each_axis_with_no_data_gets_its_own_line(self):
+        warnings = sync.unreported_warnings(frozenset({"ai", "no-upscaled"}), False)
+        assert len(warnings) == 2
+        assert any("AI-generated" in w for w in warnings)
+        assert any("upscaled with AI" in w for w in warnings)
 
     @pytest.mark.parametrize("only", [
-        None,                             # no --only at all
-        frozenset({"mature"}),            # another axis entirely
-        frozenset({"ai", "no-ai"}),       # both values: filters nothing anyway
+        None,                                    # no --only at all
+        frozenset({"mature"}),                   # an axis both routes report
+        frozenset({"ai", "no-ai"}),              # both values: filters nothing
     ])
     def test_nothing_to_warn_about(self, only):
-        assert sync.ai_axis_warning(only, False) is None
+        assert sync.unreported_warnings(only, False) == []
 
 
 class TestParseOnly:

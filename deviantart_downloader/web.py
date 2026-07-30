@@ -183,9 +183,15 @@ def normalize_web_deviation(item: dict) -> dict:
     knows about AI involvement, which the API never reports.
     """
     media = item.get("media") or {}
+    author = item.get("author") or {}
     src = web_media_url(media) if item.get("type") == "image" else None
     return {
         "deviationid": str(item.get("deviationId") or ""),
+        # The website's own numeric user id, which is not the UUID the API
+        # reports for the same user: it identifies whose gallery this is to
+        # anything comparing website listings, and to nothing else.
+        "author": {"username": author.get("username"),
+                   "userid": author.get("userId")},
         "title": item.get("title") or "untitled",
         "url": item.get("url") or "",
         "type": item.get("type"),
