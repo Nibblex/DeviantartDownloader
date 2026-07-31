@@ -7,7 +7,7 @@ import requests
 
 from deviantart_downloader import downloads
 from deviantart_downloader import web as web_mod
-from deviantart_downloader.constants import CANCEL
+from deviantart_downloader.constants import CANCEL, RESUME
 
 from .conftest import (BASE_URI, DEV_ID, FakeClient, FakeResponse, FakeSession,
                        fake_download, make_dev, recording_download)
@@ -72,6 +72,100 @@ class TestDownloadFile:
         assert downloads.download_file(session, "https://x/pic.png", dest) is False
         assert not dest.exists()
         assert not list(tmp_path.glob("*.part"))
+
+    def test_a_server_answer_of_no_is_not_asked_again(self, tmp_path):
+        # A 404 is not a connection that gave way; asking again would only
+        # spend the request. One response queued, one request made.
+        session = FakeSession(get_responses=[FakeResponse(404)])
+        assert downloads.download_file(session, "https://x/pic.png",
+                                       tmp_path / "pic.png") is False
+        assert len(session.get_calls) == 1
+
+
+class TestInterruptedTransfers:
+    """A pause or a dropped connection is picked up, not started over."""
+
+    def pausing(self, chunks, after=1):
+        """Chunks that pause the run partway through, as pressing 'p' does."""
+        def gen():
+            for index, chunk in enumerate(chunks):
+                if index == after:
+                    RESUME.clear()
+                yield chunk
+        return gen()
+
+    def resume_on_wait(self, monkeypatch):
+        """Stand in for the user pressing 'r' while the run waits."""
+        monkeypatch.setattr(downloads, "wait_if_paused", lambda: RESUME.set())
+
+    def test_a_pause_lets_go_of_the_socket_and_picks_up_by_range(
+            self, tmp_path, monkeypatch):
+        first = FakeResponse(200, chunks=self.pausing([b"abc", b"def"]))
+        rest = FakeResponse(206, chunks=[b"def"])
+        session = FakeSession(get_responses=[first, rest])
+        self.resume_on_wait(monkeypatch)
+        dest = tmp_path / "pic.png"
+
+        assert downloads.download_file(session, "https://x/pic.png", dest) is True
+        # The chunk in hand when the pause came is fetched again, not lost.
+        assert dest.read_bytes() == b"abcdef"
+        assert "Range" not in session.get_calls[0][1].get("headers", {})
+        assert session.get_calls[1][1]["headers"] == {"Range": "bytes=3-"}
+        assert not list(tmp_path.glob("*.part"))
+
+    def test_a_server_that_ignores_the_range_starts_over(self, tmp_path,
+                                                         monkeypatch):
+        # Answering 200 means the whole file is coming: appending it to what is
+        # already here would splice one onto the other.
+        first = FakeResponse(200, chunks=self.pausing([b"abc", b"def"]))
+        whole = FakeResponse(200, chunks=[b"abcdef"])
+        session = FakeSession(get_responses=[first, whole])
+        self.resume_on_wait(monkeypatch)
+        dest = tmp_path / "pic.png"
+
+        assert downloads.download_file(session, "https://x/pic.png", dest) is True
+        assert dest.read_bytes() == b"abcdef"
+
+    def test_a_lost_connection_is_picked_up_from_what_is_on_disk(
+            self, tmp_path, capsys):
+        def dies():
+            yield b"abc"
+            raise requests.ConnectionError("connection reset")
+
+        session = FakeSession(get_responses=[
+            FakeResponse(200, chunks=dies()),
+            FakeResponse(206, chunks=[b"def"]),
+        ])
+        dest = tmp_path / "pic.png"
+        assert downloads.download_file(session, "https://x/pic.png", dest) is True
+        assert dest.read_bytes() == b"abcdef"
+        assert session.get_calls[1][1]["headers"] == {"Range": "bytes=3-"}
+        assert "picking it up again" in capsys.readouterr().out
+
+    def test_it_gives_up_after_a_few_goes(self, tmp_path, capsys):
+        def dies():
+            yield b"abc"
+            raise requests.ConnectionError("connection reset")
+
+        session = FakeSession(get_responses=[
+            FakeResponse(200, chunks=dies()) for _ in range(4)])
+        dest = tmp_path / "pic.png"
+        assert downloads.download_file(session, "https://x/pic.png", dest) is False
+        # The first go plus STREAM_RETRIES more, and nothing left behind.
+        assert len(session.get_calls) == downloads.STREAM_RETRIES + 1
+        assert not dest.exists() and not list(tmp_path.glob("*.part"))
+        assert "ERROR" in capsys.readouterr().out
+
+    def test_quitting_while_paused_leaves_nothing_behind(self, tmp_path,
+                                                         monkeypatch):
+        session = FakeSession(get_responses=[
+            FakeResponse(200, chunks=self.pausing([b"abc", b"def"]))])
+        # 'q' pressed while the run sat paused.
+        monkeypatch.setattr(downloads, "wait_if_paused",
+                            lambda: (RESUME.set(), CANCEL.set()))
+        dest = tmp_path / "pic.png"
+        assert downloads.download_file(session, "https://x/pic.png", dest) is False
+        assert not dest.exists() and not list(tmp_path.glob("*.part"))
 
 
 class TestProcessDeviation:

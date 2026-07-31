@@ -6,7 +6,7 @@ import requests
 
 from . import literature
 from .api import DeviantArtClient
-from .constants import API_SUBDIR, CANCEL, wait_if_paused
+from .constants import API_SUBDIR, CANCEL, RESUME, wait_if_paused
 from .literature import KIND_HTML, KIND_TEXT, classify_web_html, is_text_work
 from .manifest import DownloadManifest
 from .naming import (clamp_wixmp_blur, content_src, deviation_key,
@@ -54,32 +54,99 @@ def _is_the_original(session: requests.Session, offered: str,
     return remote_size(session, offered) == original_size
 
 
+# How many times a transfer is picked up again after the connection failed.
+# A pause is not one of these: it is not a failure and can happen all day.
+STREAM_RETRIES = 2
+
+
+def _receive(resp, tmp: Path, append: bool) -> str:
+    """Write a response body to the partial file; say why it stopped.
+
+    "done" when the body ran out, "cancelled" for 'q', and "paused" for 'p' --
+    which returns rather than blocking, so the socket is let go of instead of
+    being held open for however long the pause lasts. The chunk in hand is
+    dropped with it and fetched again by the request that picks up from what is
+    on disk; both checks come before the write so that a pause always leaves
+    something still to fetch.
+    """
+    with open(tmp, "ab" if append else "wb") as f:
+        for chunk in resp.iter_content(chunk_size=1 << 16):
+            if CANCEL.is_set():
+                return "cancelled"
+            if not RESUME.is_set():
+                return "paused"
+            f.write(chunk)
+    return "done"
+
+
 def download_file(
     session: requests.Session, url: str, dest: Path,
     fallback_url: str | None = None,
 ) -> bool:
+    """Fetch a URL into dest, picking up again what interrupted it.
+
+    A pause used to be taken mid-transfer, with the response half-read and the
+    socket held open for as long as the user was away; whatever closed it first
+    -- the CDN, a laptop going to sleep, a router -- ended the work as a failure
+    and threw away every byte of it. The transfer is now let go of instead, and
+    what is already on disk is continued with a Range request, which the CDN
+    answers with a 206. A connection lost mid-transfer is picked up the same
+    way, a couple of times, before it counts as a failure.
+
+    The partial file is only ever continued within this call: a leftover from an
+    earlier run may well be a different URL's, and appending to that would
+    splice two files into one.
+    """
     tmp = dest.with_suffix(dest.suffix + ".part")
-    try:
-        with session.get(url, stream=True, timeout=60) as resp:
-            if resp.status_code == 403 and fallback_url:
-                # The unblurred URL was rejected (token pinned to the
-                # blurred transformation); keep the blurred preview.
-                print(f"  Unblur rejected by the CDN, keeping the blurred preview: {dest.name}")
-                return download_file(session, fallback_url, dest)
-            resp.raise_for_status()
-            with open(tmp, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1 << 16):
-                    wait_if_paused()      # pauses mid-download when the user asks
-                    if CANCEL.is_set():
-                        tmp.unlink(missing_ok=True)
-                        return False
-                    f.write(chunk)
-        tmp.rename(dest)
-        return True
-    except Exception as e:
+    tmp.unlink(missing_ok=True)
+
+    def failed(reason) -> bool:
         tmp.unlink(missing_ok=True)
-        print(f"  ERROR downloading {url}: {e}")
+        print(f"  ERROR downloading {url}: {reason}")
         return False
+
+    retries = STREAM_RETRIES
+    while True:
+        have = tmp.stat().st_size if tmp.is_file() else 0
+        try:
+            with session.get(url, stream=True, timeout=60,
+                             headers={"Range": f"bytes={have}-"} if have else {}
+                             ) as resp:
+                if resp.status_code == 403 and fallback_url:
+                    # The unblurred URL was rejected (token pinned to the
+                    # blurred transformation); keep the blurred preview.
+                    print(f"  Unblur rejected by the CDN, keeping the blurred preview: {dest.name}")
+                    return download_file(session, fallback_url, dest)
+                resp.raise_for_status()
+                # A server that ignores the Range sends the whole file back:
+                # appending that to what is here would splice one onto the other.
+                stopped = _receive(resp, tmp, append=bool(have) and
+                                   resp.status_code == 206)
+        except requests.HTTPError as e:
+            # The server answered, and the answer was no: a 404, a 403 with no
+            # blurred fallback. Asking again would only spend the request.
+            return failed(e)
+        except requests.RequestException as e:
+            # The transport gave way instead -- a connection closed, a read
+            # timed out -- which is exactly what picking it up again is for.
+            retries -= 1
+            if retries < 0 or CANCEL.is_set():
+                return failed(e)
+            print(f"  Connection lost {have} bytes into {dest.name}, "
+                  f"picking it up again: {e}")
+            continue
+        except Exception as e:
+            return failed(e)
+        if stopped == "done":
+            tmp.rename(dest)
+            return True
+        if stopped == "cancelled":
+            tmp.unlink(missing_ok=True)
+            return False
+        wait_if_paused()          # 'p': waited out with no socket held open
+        if CANCEL.is_set():       # 'q' pressed while paused
+            tmp.unlink(missing_ok=True)
+            return False
 
 
 def resolve_literature(dev: dict, client: DeviantArtClient,

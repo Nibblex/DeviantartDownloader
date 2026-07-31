@@ -235,6 +235,8 @@ Galleries downloaded by earlier versions keep their existing flat layout; those 
 
 While it is fetching the listing or downloading, and when run in a terminal, you can steer it from the keyboard: **`p`** pauses, **`r`** resumes, and **`q`** quits (like `Ctrl+C`: it stops and cleans up, and re-running resumes where it left off). A status line pinned to the bottom of the terminal shows the available keys and the current state, and the output scrolls above it. When the output is piped or redirected, these controls are simply inactive.
 
+**A pause holds no connection open.** The files being transferred when you press `p` are let go of rather than left half-read with the socket waiting, and what is already on disk is continued with a range request when you resume — so pausing for an hour costs the same as pausing for a second, and the bytes stop arriving straight away. A connection lost mid-transfer is picked up the same way, twice, before the work counts as a failure. (Before this, a long pause ended those transfers as failures: whatever closed the idle connection first — the CDN, a laptop going to sleep — took every byte down with it.)
+
 ### Replacing copies you saved blurred (`--redownload-blurred`)
 
 Mature works downloaded before you ran `--login` are the blurred placeholder the API serves an anonymous visitor. `--redownload-blurred` fetches those again now that your account can see the real image:
