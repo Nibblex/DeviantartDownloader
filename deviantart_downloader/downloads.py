@@ -59,24 +59,23 @@ def _is_the_original(session: requests.Session, offered: str,
 STREAM_RETRIES = 2
 
 
-def _receive(resp, tmp: Path, append: bool) -> str:
-    """Write a response body to the partial file; say why it stopped.
+def _receive(resp, tmp: Path, append: bool) -> bool:
+    """Write a response body to the partial file. True when it ran out.
 
-    "done" when the body ran out, "cancelled" for 'q', and "paused" for 'p' --
-    which returns rather than blocking, so the socket is let go of instead of
-    being held open for however long the pause lasts. The chunk in hand is
-    dropped with it and fetched again by the request that picks up from what is
-    on disk; both checks come before the write so that a pause always leaves
-    something still to fetch.
+    False means the user interrupted it, with 'p' or with 'q' -- which returns
+    rather than blocking, so the socket is let go of instead of being held open
+    for however long a pause lasts. Which of the two it was is the caller's to
+    sort out, and it has to look anyway: a pause can turn into a quit while it
+    waits. The chunk in hand is dropped along with the socket and fetched again
+    by the request that picks up from what is on disk; both checks come before
+    the write, so an interruption always leaves something still to fetch.
     """
     with open(tmp, "ab" if append else "wb") as f:
         for chunk in resp.iter_content(chunk_size=1 << 16):
-            if CANCEL.is_set():
-                return "cancelled"
-            if not RESUME.is_set():
-                return "paused"
+            if CANCEL.is_set() or not RESUME.is_set():
+                return False
             f.write(chunk)
-    return "done"
+    return True
 
 
 def download_file(
@@ -118,10 +117,11 @@ def download_file(
                     print(f"  Unblur rejected by the CDN, keeping the blurred preview: {dest.name}")
                     return download_file(session, fallback_url, dest)
                 resp.raise_for_status()
-                # A server that ignores the Range sends the whole file back:
-                # appending that to what is here would splice one onto the other.
-                stopped = _receive(resp, tmp, append=bool(have) and
-                                   resp.status_code == 206)
+                # 206 is the answer to the Range, which is only ever sent when
+                # there is something to continue. A server that ignores it sends
+                # the whole file back, and appending that to what is already
+                # here would splice one onto the other.
+                received = _receive(resp, tmp, append=resp.status_code == 206)
         except requests.HTTPError as e:
             # The server answered, and the answer was no: a 404, a 403 with no
             # blurred fallback. Asking again would only spend the request.
@@ -137,14 +137,13 @@ def download_file(
             continue
         except Exception as e:
             return failed(e)
-        if stopped == "done":
+        if received:
             tmp.rename(dest)
             return True
-        if stopped == "cancelled":
-            tmp.unlink(missing_ok=True)
-            return False
-        wait_if_paused()          # 'p': waited out with no socket held open
-        if CANCEL.is_set():       # 'q' pressed while paused
+        # Interrupted: 'p' is waited out here, with no socket held open, and 'q'
+        # falls straight through -- waiting out a cancelled run returns at once.
+        wait_if_paused()
+        if CANCEL.is_set():
             tmp.unlink(missing_ok=True)
             return False
 

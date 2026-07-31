@@ -22,6 +22,10 @@ if TYPE_CHECKING:                     # overrides.py reads this module's
     from .overrides import UserOverrides   # selectors, so the import is one-way
 
 STATUSES = ("downloaded", "replaced", "skipped", "failed", "no_media", "cancelled")
+# The ones -q silences: what went to plan, and works there was nothing to save
+# for -- nothing went wrong there either, and the summary still counts them.
+# Kept next to STATUSES so a new status cannot quietly default to shouting.
+QUIET_STATUSES = frozenset(("downloaded", "skipped", "no_media"))
 
 # The friends endpoint caps its page size lower than the gallery listing does.
 WATCH_PAGE_LIMIT = 50
@@ -482,10 +486,10 @@ def sync_gallery(
                         counts[subdir]["downloaded"] += 1
                         counts[subdir]["bytes"] += size
                         counts["bytes"] += size
-                    # A failure, an empty work or a cancellation is a result,
-                    # not progress: -q drops the running commentary, never the
-                    # works that did not make it.
-                    line = say if status in ("downloaded", "skipped") else print
+                    # A failure or a cancellation is a result, not progress: -q
+                    # drops the running commentary, never the works that did not
+                    # make it.
+                    line = say if status in QUIET_STATUSES else print
                     line(f"[{done}/{total}] {message}")
                     # Said after the failure it follows, and by print for the
                     # same reason: whatever went wrong, the answer that led here

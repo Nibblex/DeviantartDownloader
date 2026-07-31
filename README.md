@@ -196,7 +196,7 @@ The ids are written by the tool, not by hand, and appear the first time a user i
 
 The gallery folder is still named after the username, so a renamed user's older files stay in the folder under the old name; only the settings follow the rename.
 
-Pass `-q/--quiet` (or `DA_QUIET=true`) when the progress is more noise than signal — a long sync prints one line per work, and `--watching` multiplies that by every user you follow. It drops the lines for works that *succeeded*; summaries, the works that failed, warnings, errors and the `--watching` confirmation still print, so a quiet run still tells you what happened and what went wrong. On the demo profile below that is 34 lines of output against 8. It layers on anything else: `--watching -q`, `--info -q`, `--only images -q`.
+Pass `-q/--quiet` (or `DA_QUIET=true`) when the progress is more noise than signal — a long sync prints one line per work, and `--watching` multiplies that by every user you follow. It drops the lines for works that *succeeded*, and for the ones that had nothing to save (nothing went wrong there either — the summary still counts them); summaries, the works that failed, warnings, errors and the `--watching` confirmation still print, so a quiet run still tells you what happened and what went wrong. On the demo profile below that is 34 lines of output against 8. It layers on anything else: `--watching -q`, `--info -q`, `--only images -q`.
 
 Progress does not disappear, it moves: in a terminal it goes to the status line pinned at the bottom, next to the keyboard controls, so a quiet run still shows what it is working on.
 

@@ -62,6 +62,9 @@ class TestDownloadFile:
         assert not dest.exists()
         assert not list(tmp_path.glob("*.part"))
         assert "ERROR" in capsys.readouterr().out
+        # A server that answers is not asked again: a 404 is not a connection
+        # that gave way, and asking twice would only spend the request.
+        assert len(session.get_calls) == 1
 
     def test_cancel_aborts_mid_download(self, tmp_path):
         session = FakeSession(get_responses=[
@@ -73,23 +76,15 @@ class TestDownloadFile:
         assert not dest.exists()
         assert not list(tmp_path.glob("*.part"))
 
-    def test_a_server_answer_of_no_is_not_asked_again(self, tmp_path):
-        # A 404 is not a connection that gave way; asking again would only
-        # spend the request. One response queued, one request made.
-        session = FakeSession(get_responses=[FakeResponse(404)])
-        assert downloads.download_file(session, "https://x/pic.png",
-                                       tmp_path / "pic.png") is False
-        assert len(session.get_calls) == 1
-
 
 class TestInterruptedTransfers:
     """A pause or a dropped connection is picked up, not started over."""
 
-    def pausing(self, chunks, after=1):
-        """Chunks that pause the run partway through, as pressing 'p' does."""
+    def pausing(self, chunks):
+        """Chunks that pause the run after the first, as pressing 'p' does."""
         def gen():
             for index, chunk in enumerate(chunks):
-                if index == after:
+                if index:
                     RESUME.clear()
                 yield chunk
         return gen()

@@ -1137,8 +1137,21 @@ class TestQuiet:
         cli.run()
         out = capsys.readouterr().out
         assert "FAILED: api/My Art_abcd1234.png" in out      # named, not just counted
-        assert "NO FILE (no text or media): Journal" in out
+        # A work with nothing to save is not something that went wrong, so it
+        # goes with the commentary; the summary still counts it.
+        assert "NO FILE (no text or media)" not in out
         assert "Failed: 1" in out and "No file: 1" in out
+
+    def test_a_work_with_nothing_to_save_is_named_without_quiet(
+            self, clean_cli_env, monkeypatch, capsys):
+        monkeypatch.setattr(listing, "fetch_gallery",
+                            lambda client, username, **kw: [
+                                make_dev(deviationid="ffffeeee-0000",
+                                         title="Journal", content=None)])
+        set_argv(monkeypatch, "artist", "-o", str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+        assert "NO FILE (no text or media): Journal" in capsys.readouterr().out
 
     def test_the_footer_names_the_route_of_each_work(self, clean_cli_env,
                                                      monkeypatch, both_routes):
