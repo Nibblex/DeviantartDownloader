@@ -15,7 +15,7 @@ from .overrides import FILENAME, FORMAT, ONLY, load_overrides
 from .profile import print_profiles
 from .sync import (ONLY_FILTERS, add_stats, discover_users, fetch_watching,
                    human_size, new_stats, parse_date, parse_only,
-                   summary_lines, sync_gallery, worth_repairing)
+                   summary_lines, sync_gallery, verify_users, worth_repairing)
 from .web import WebClient
 
 
@@ -31,6 +31,24 @@ def confirm(question: str) -> bool:
         return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
     except (EOFError, ValueError):        # stdin closed mid-prompt
         return False
+
+
+def without_skipped(usernames: list[str], overrides) -> list[str]:
+    """Drop the users the settings file marks skip, and say how many.
+
+    Only ever applied to a batch. Naming one profile on the command line is as
+    explicit as a request gets, and the file does not overrule it -- the same
+    precedence every other setting in it follows.
+    """
+    wanted = [name for name in usernames if not overrides.skips(name)]
+    left_out = len(usernames) - len(wanted)
+    if left_out:
+        print(f"{overrides.path.name}: {left_out} of {len(usernames)} user(s) "
+              f"marked skip, left out.")
+    if not wanted:
+        sys.exit(f"Every user is marked skip in {overrides.path.name}, so there "
+                 "is nothing to do.")
+    return wanted
 
 
 def run():
@@ -130,15 +148,33 @@ def run():
     parser.add_argument("--user-config", metavar="PATH",
                         default=os.environ.get("DA_USER_CONFIG", "").strip() or None,
                         help=f"Per-user settings file: a JSON object naming a "
-                             f"username and the --only and --literature-format to "
-                             f"sync them with, for that user alone (default: "
-                             f"{FILENAME} in the output folder, if it exists; also "
+                             f"username and the --only, --literature-format and "
+                             f'"skip" to sync them with, for that user alone '
+                             f"(default: {FILENAME} in the output folder, if it "
+                             "exists; also "
                              "DA_USER_CONFIG in .env). Either flag given above "
                              "outranks it and settles that setting for everyone, so "
                              "the file has the say on whatever this run leaves out. "
                              "Renames are followed: each entry records the id the "
                              "route reports for that user, so the settings move to "
                              "the new name instead of being lost")
+    parser.add_argument("--verify", action="store_true",
+                        help="Check what is already downloaded against its own "
+                             "record and report: works recorded but missing from "
+                             "disk, empty files, and .part files an interrupted "
+                             "run left behind. Repairs nothing and downloads "
+                             "nothing, needs no credentials, and exits non-zero "
+                             "when it finds something. With a profile it checks "
+                             "that user, otherwise every user in the output folder")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="List and route the works, report what a real run "
+                             "would fetch, and stop before fetching any of it. "
+                             "Nothing is written: not the gallery folder, not the "
+                             "metadata file, not the per-user settings file. The "
+                             "mature works are counted rather than looked up, "
+                             "since that lookup is the part that costs API quota. "
+                             "Combines with the --redownload-* flags, and the "
+                             "counts move with them")
     parser.add_argument("--since", metavar="DATE",
                         help="Keep only the works published on or after this date "
                              "(YYYY-MM-DD, or a full ISO 8601 timestamp; no offset "
@@ -201,6 +237,32 @@ def run():
     if args.api_workers < 1:
         sys.exit(f"The number of API workers must be at least 1 (got: {args.api_workers}).")
 
+    # Ahead of the checks below, so that a --verify asked for alongside one of
+    # them hears about that rather than about a rule it was never subject to:
+    # --verify wants no profile and no gallery, so "--info needs a profile" is
+    # the wrong thing to answer somebody who typed both.
+    if args.verify:
+        # Every one of these would otherwise be silently ignored, --login most
+        # sharply: this branch exits above the point where it would happen, so
+        # asking for both would log you in never and say nothing about it.
+        clashes = [name for name, given in (("--watching", args.watching),
+                                            ("--info", args.info),
+                                            ("--login", args.login),
+                                            ("--dry-run", args.dry_run),
+                                            ("--gallery", args.gallery)) if given]
+        if clashes:
+            sys.exit(f"--verify does not combine with {', '.join(clashes)}: it "
+                     "reads the output folder and does nothing else, so there "
+                     "is nothing for those to change. Run it on its own, with a "
+                     "profile or without one.")
+        # Ahead of the credentials check on purpose: this reads the disk and
+        # nothing else, and a copy can be verified by someone who never
+        # registered an application.
+        root = Path(args.output).expanduser()
+        names = ([extract_username(args.profile_url)] if args.profile_url
+                 else discover_users(root))
+        sys.exit(0 if verify_users(root, names) else 1)
+
     if args.watching and args.profile_url:
         sys.exit("--watching already picks the profiles to work on (every user "
                  "you watch); drop the profile argument or drop --watching.")
@@ -235,7 +297,8 @@ def run():
     output_root = Path(args.output).expanduser()
     # Read before anything is fetched, so a typo in it is heard about before a
     # watchlist is walked or a single work downloaded.
-    overrides = load_overrides(args.user_config, output_root, locked)
+    overrides = load_overrides(args.user_config, output_root, locked,
+                               read_only=args.dry_run)
     if shadowed := overrides.shadowed():
         flags = ", ".join(f"--{name}" for name in sorted(shadowed))
         say(f"{flags} given on the command line, which settles it for every user: "
@@ -252,18 +315,29 @@ def run():
         # Either way a whole watchlist is a long job, so it is worth seeing the
         # size of it before it starts. Interrupting later loses no progress.
         print(f"\nYou watch {len(usernames)} user(s).")
-        action = (f"Show the profile of all {len(usernames)} of them" if args.info
-                  else f"Download all {len(usernames)} galleries into {output_root}")
+        # Before the question, so the number it quotes is the one it will do.
+        usernames = without_skipped(usernames, overrides)
+        # A dry run still walks every listing, which is what makes a watchlist
+        # long, so it is still worth asking -- but asking whether to download
+        # would be the one place it promised something it will not do.
+        if args.info:
+            action = f"Show the profile of all {len(usernames)} of them"
+        elif args.dry_run:
+            action = (f"Work out what a sync of all {len(usernames)} galleries "
+                      "would fetch")
+        else:
+            action = f"Download all {len(usernames)} galleries into {output_root}"
         if not confirm(f"{action}?"):
             print("Cancelled.")
             return
         print()
     else:
         # No profile: sync every user already downloaded to the output folder
-        usernames = discover_users(output_root)
+        usernames = without_skipped(discover_users(output_root), overrides)
         say(
-            f"No profile given: syncing {len(usernames)} previously "
-            f"downloaded user(s) in {output_root}: {', '.join(usernames)}\n"
+            f"No profile given: {'checking' if args.dry_run else 'syncing'} "
+            f"{len(usernames)} previously downloaded user(s) in "
+            f"{output_root}: {', '.join(usernames)}\n"
         )
 
     if args.redownload_blurred:
@@ -317,6 +391,7 @@ def run():
                 full=args.full, web=web, gallery=args.gallery,
                 text_format=text_format, only=only,
                 overrides=overrides, since=since, until=until,
+                dry_run=args.dry_run,
             )
         except UNREADABLE_PROFILE as e:
             # A batch outlives the accounts in it. Whichever call found out this
@@ -335,7 +410,9 @@ def run():
         per_user.append((username, counts))
         print()
 
-    if len(usernames) > 1:
+    # A dry run has already said what it would do, per user. Folding zeroes into
+    # a line that begins "All users synced" would only misreport it.
+    if len(usernames) > 1 and not args.dry_run:
         totals["requests"] = client.limiter.requests - spent_before
         lines = summary_lines(totals, users=len(per_user))
         print(f"All users synced. {lines[0]}")

@@ -12,4 +12,4 @@ exits on import when requests is missing, and a machine that is only building a
 wheel has no reason to have it installed.
 """
 
-__version__ = "3.7.0"
+__version__ = "3.8.0"

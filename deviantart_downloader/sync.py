@@ -318,6 +318,67 @@ def summary_lines(stats: dict, *, users: int | None = None) -> list[str]:
     return lines
 
 
+def _would_be_left_alone(dev: dict, manifest: DownloadManifest | None,
+                         out_dir: Path, redownload_missing: bool,
+                         redownload_blurred: bool) -> bool:
+    """Whether a real run would pass this work over, the way it decides itself.
+
+    A mirror of the first thing process_deviation does, and the reason a dry
+    run can answer at all: the record and the disk are both here and neither
+    costs a request to read. It stops exactly where that function starts
+    spending -- whether the API is now offering something better than a blurred
+    copy cannot be known without asking, so a work a repair pass might replace
+    counts as one that would be fetched.
+    """
+    key = deviation_key(dev)
+    if not (key and manifest is not None and manifest.has(key)):
+        return False
+    existing = manifest.filename_for(key)
+    if existing and (out_dir / existing).is_file():
+        # --redownload-blurred revisits what the API route wrote, and only that.
+        return not (redownload_blurred and existing.startswith(f"{API_SUBDIR}/"))
+    # On record but gone from disk: the record keeps it deleted unless asked.
+    return not redownload_missing
+
+
+def plan_summary(deviations: list[dict], manifest: DownloadManifest | None,
+                 from_web: bool, out_dir: Path, *,
+                 redownload_missing: bool = False,
+                 redownload_blurred: bool = False) -> list[str]:
+    """What a run would do, without doing any of it. For --dry-run.
+
+    Read off the listing alone, which is the whole budget a dry run gets.
+    Turning a blocked website entry into the API entry that could be downloaded
+    costs a page of the API's own listing, and spending quota to answer a
+    question asked about spending quota would defeat the exercise, so those
+    works are counted where a real run would look them up.
+
+    Whether a work would be fetched is answered from the record and the disk
+    together, because that is what a real run consults -- being on record is
+    not enough on its own, since --redownload-missing fetches back exactly the
+    works whose file has gone. It is still not the whole answer: a work can
+    turn out to have no file to offer, or fail once asked for, so this is what
+    would be attempted rather than what would land.
+    """
+    web_devs = [d for d in deviations if not needs_api(d)]
+    blocked = [d for d in deviations if needs_api(d)]
+    left_alone = sum(1 for d in deviations
+                     if _would_be_left_alone(d, manifest, out_dir,
+                                             redownload_missing,
+                                             redownload_blurred))
+    lines = [
+        "Dry run: nothing is downloaded, and nothing is written.",
+        f"  {len(deviations)} work(s) selected: {len(web_devs)} via the website "
+        f"({WEB_SUBDIR}/), {len(blocked)} via the API ({API_SUBDIR}/).",
+        f"  {left_alone} would be skipped, so {len(deviations) - left_alone} "
+        "would be fetched.",
+    ]
+    if from_web and blocked:
+        lines.append(f"  Reaching those {len(blocked)} would need a listing "
+                     "lookup on the API first, which this did not spend.")
+    return lines
+
+
 def discover_users(output_root: Path) -> list[str]:
     """List the users already downloaded to the output folder.
 
@@ -388,6 +449,113 @@ def worth_repairing(output_root: Path, username: str) -> bool:
     return out_dir.is_dir() and DownloadManifest(out_dir).has_api_route_files()
 
 
+class Damage(NamedTuple):
+    """What a gallery folder is missing, or holding that it should not."""
+    recorded: int
+    missing: list[str]      # on record, not on disk
+    empty: list[str]        # on disk, and nothing in them
+    partial: list[str]      # .part files an interrupted run left behind
+
+    @property
+    def clean(self) -> bool:
+        """True when there is nothing here worth reporting.
+
+        Both the report and the exit code ask this, so it is stated once beside
+        the fields it reads rather than spelled out at each of them: a fourth
+        kind of damage added above and to only one of the two would have
+        --verify describe a problem and then exit saying it found none.
+        """
+        return not (self.missing or self.empty or self.partial)
+
+
+def inspect_gallery(output_root: Path, username: str) -> Damage | None:
+    """Check a gallery against its own download record. None if there is none.
+
+    Read-only, and offline: the record says what was fetched and where it
+    landed, and the disk either agrees or does not. Nothing here is repaired,
+    because the two answers a repair could give -- fetch it again, or accept
+    that it is gone -- are the user's to choose between and already have flags.
+
+    A zero-byte file counts as damage of its own. It is what an interrupted
+    write can leave, and every other check would call it present.
+    """
+    out_dir = output_root / username
+    if not out_dir.is_dir():
+        return None
+    manifest = DownloadManifest(out_dir)
+    entries = manifest.recorded()
+    missing, empty = [], []
+    for _, rel in entries:
+        path = out_dir / rel
+        if not path.is_file():
+            missing.append(rel)
+        elif path.stat().st_size == 0:
+            empty.append(rel)
+    partial = sorted(p.relative_to(out_dir).as_posix()
+                     for p in out_dir.rglob("*.part"))
+    return Damage(len(entries), sorted(missing), sorted(empty), partial)
+
+
+# A gallery can be wrong by the hundred, and a wall of names helps nobody
+# decide anything; the count above each list is the part worth reading.
+_SHOWN_PER_KIND = 10
+
+
+def _listed(names: list[str]) -> list[str]:
+    shown = [f"    - {name}" for name in names[:_SHOWN_PER_KIND]]
+    if len(names) > _SHOWN_PER_KIND:
+        shown.append(f"    ... and {len(names) - _SHOWN_PER_KIND} more")
+    return shown
+
+
+def verification_lines(username: str, damage: Damage | None) -> list[str]:
+    """One user's verification, as the lines to print."""
+    lines = [f"User: {profile_label(username)}"]
+    if damage is None:
+        lines.append("  Nothing has been downloaded here.")
+        return lines
+    if damage.clean:
+        lines.append(f"  {damage.recorded} recorded work(s), all present.")
+        return lines
+    lines.append(f"  {damage.recorded} recorded work(s).")
+    if damage.missing:
+        lines.append(f"  {len(damage.missing)} on record but not on disk:")
+        lines += _listed(damage.missing)
+        lines.append("    Pass --redownload-missing to fetch these again; left "
+                     "alone, the record keeps them deleted.")
+    if damage.empty:
+        lines.append(f"  {len(damage.empty)} empty file(s):")
+        lines += _listed(damage.empty)
+        lines.append("    Delete them and pass --redownload-missing; while they "
+                     "exist the run counts them as already downloaded.")
+    if damage.partial:
+        lines.append(f"  {len(damage.partial)} leftover .part file(s) from an "
+                     "interrupted run:")
+        lines += _listed(damage.partial)
+        lines.append("    Harmless, and safe to delete: a transfer only ever "
+                     "continues one within the call that made it.")
+    return lines
+
+
+def verify_users(output_root: Path, usernames: list[str]) -> bool:
+    """Print a verification per user. True when every one of them checked out.
+
+    The answer is returned rather than only printed so the command can exit
+    non-zero on damage, which is what a script asking "is my copy intact?"
+    needs and what reading the output back would otherwise cost.
+    """
+    clean = True
+    for index, username in enumerate(usernames):
+        if index:
+            print()
+        damage = inspect_gallery(output_root, username)
+        if damage is not None and not damage.clean:
+            clean = False
+        for line in verification_lines(username, damage):
+            print(line)
+    return clean
+
+
 def sync_gallery(
     client: DeviantArtClient, username: str, output_root: Path, *,
     web_workers: int, api_workers: int,
@@ -396,6 +564,7 @@ def sync_gallery(
     text_format: str = "txt", only: frozenset[str] | None = None,
     overrides: "UserOverrides | None" = None,
     since: datetime | None = None, until: datetime | None = None,
+    dry_run: bool = False,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
     or None when the gallery is empty.
@@ -476,6 +645,16 @@ def sync_gallery(
             print(f"No {kind} to download in this gallery{window}.")
             return new_stats()
         say(f"\nTotal works found: {len(deviations)}\n")
+
+        if dry_run:
+            # Before anything is created or written: the folder itself would be
+            # a side effect for a user who has never been downloaded, and the
+            # metadata file would be one for everybody else.
+            for line in plan_summary(deviations, manifest, from_web, out_dir,
+                                     redownload_missing=redownload_missing,
+                                     redownload_blurred=redownload_blurred):
+                print(line)
+            return new_stats()
 
         out_dir.mkdir(parents=True, exist_ok=True)
         if manifest is None:

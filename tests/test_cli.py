@@ -2,6 +2,7 @@
 
 import io
 import json
+import sys
 
 import pytest
 
@@ -620,6 +621,268 @@ class TestPerUserSettings:
         with pytest.raises(SystemExit, match="asks --only for sfw"):
             self.run(monkeypatch, out)
         assert not (out / "artist").exists()
+
+
+class TestVerify:
+    """--verify reads the disk, repairs nothing, and needs no credentials."""
+
+    def gallery(self, root, name="artist", entries=None, present=()):
+        out = root / name
+        (out / "web").mkdir(parents=True)
+        (out / "_downloaded.json").write_text(
+            json.dumps(entries if entries is not None else {}), encoding="utf-8")
+        for rel in present:
+            (out / rel).write_bytes(b"data")
+        return out
+
+    def test_a_clean_copy_exits_zero(self, clean_cli_env, monkeypatch, capsys):
+        out = clean_cli_env / "out"
+        self.gallery(out, entries={"111": "web/A_111.jpg"},
+                     present=["web/A_111.jpg"])
+        set_argv(monkeypatch, "artist", "-o", str(out), "--verify")
+        with pytest.raises(SystemExit) as excinfo:
+            cli.run()
+        assert excinfo.value.code == 0
+        assert "1 recorded work(s), all present." in capsys.readouterr().out
+
+    def test_damage_exits_non_zero_so_a_script_can_tell(self, clean_cli_env,
+                                                        monkeypatch, capsys):
+        out = clean_cli_env / "out"
+        self.gallery(out, entries={"111": "web/Gone_111.jpg"})
+        set_argv(monkeypatch, "artist", "-o", str(out), "--verify")
+        with pytest.raises(SystemExit) as excinfo:
+            cli.run()
+        assert excinfo.value.code == 1
+        assert "web/Gone_111.jpg" in capsys.readouterr().out
+
+    def test_it_needs_no_credentials(self, clean_cli_env, monkeypatch, capsys):
+        """A copy can be checked by someone who never registered an application."""
+        out = clean_cli_env / "out"
+        self.gallery(out, entries={"111": "web/A_111.jpg"},
+                     present=["web/A_111.jpg"])
+        monkeypatch.setattr(sys, "argv",
+                            ["deviantart-downloader", "artist", "-o", str(out),
+                             "--verify"])
+        with pytest.raises(SystemExit) as excinfo:
+            cli.run()
+        assert excinfo.value.code == 0
+        assert "Missing API credentials" not in capsys.readouterr().out
+
+    def test_without_a_profile_it_checks_everyone_in_the_folder(
+            self, clean_cli_env, monkeypatch, capsys):
+        out = clean_cli_env / "out"
+        self.gallery(out, "alice", entries={"1": "web/A_1.jpg"},
+                     present=["web/A_1.jpg"])
+        self.gallery(out, "bob", entries={"2": "web/B_2.jpg"},
+                     present=["web/B_2.jpg"])
+        set_argv(monkeypatch, "-o", str(out), "--verify")
+        with pytest.raises(SystemExit) as excinfo:
+            cli.run()
+        assert excinfo.value.code == 0
+        printed = capsys.readouterr().out
+        assert "User: alice" in printed and "User: bob" in printed
+
+    @pytest.mark.parametrize("flag", [
+        "--watching", "--info", "--login", "--dry-run",
+    ])
+    def test_it_rejects_the_flags_it_would_otherwise_ignore(
+            self, clean_cli_env, monkeypatch, flag):
+        """--login most sharply: the verify exit is above where it happens, so
+        asking for both would log you in never and say nothing about it."""
+        set_argv(monkeypatch, "--verify", flag, "-o", str(clean_cli_env / "out"))
+        with pytest.raises(SystemExit, match=f"does not combine with {flag}"):
+            cli.run()
+
+    def test_gallery_is_rejected_too(self, clean_cli_env, monkeypatch):
+        set_argv(monkeypatch, "artist", "--verify", "-g", "Sketches",
+                 "-o", str(clean_cli_env / "out"))
+        with pytest.raises(SystemExit, match="does not combine with --gallery"):
+            cli.run()
+
+    def test_it_downloads_nothing(self, clean_cli_env, monkeypatch, no_downloads):
+        out = clean_cli_env / "out"
+        self.gallery(out, entries={"111": "web/Gone_111.jpg"})
+        set_argv(monkeypatch, "artist", "-o", str(out), "--verify")
+        with pytest.raises(SystemExit):
+            cli.run()
+
+
+class TestDryRun:
+    def test_it_reports_the_plan_and_fetches_nothing(self, clean_cli_env,
+                                                     monkeypatch, capsys,
+                                                     no_downloads):
+        web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--dry-run")
+        cli.run()
+        printed = capsys.readouterr().out
+        assert "Dry run: nothing is downloaded, and nothing is written." in printed
+        assert "1 work(s) selected: 1 via the website (web/), 0 via the API" in printed
+        assert "0 would be skipped, so 1 would be fetched." in printed
+
+    def test_it_writes_nothing_at_all(self, clean_cli_env, monkeypatch,
+                                      no_downloads):
+        """Not the gallery folder, and not the metadata file either."""
+        web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--dry-run")
+        cli.run()
+        assert not (out / "artist").exists()
+
+    def test_it_counts_what_is_already_on_record(self, clean_cli_env,
+                                                 monkeypatch, capsys,
+                                                 no_downloads):
+        out = clean_cli_env / "out"
+        gallery = out / "artist"
+        gallery.mkdir(parents=True)
+        (gallery / "_downloaded.json").write_text(
+            json.dumps({"1004952679": "web/Web Art_1004952679.jpg"}),
+            encoding="utf-8")
+        web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--dry-run")
+        cli.run()
+        assert "1 would be skipped, so 0 would be fetched." in capsys.readouterr().out
+
+    def test_it_does_not_write_the_settings_file_either(self, clean_cli_env,
+                                                        monkeypatch,
+                                                        no_downloads):
+        """_users.json lives in the output root, above the gallery folder.
+
+        for_user records the id that makes a later rename followable, which is
+        a write like any other -- a run promising to write nothing cannot make
+        an exception for it.
+        """
+        out = clean_cli_env / "out"
+        out.mkdir(parents=True)
+        settings = out / "_users.json"
+        settings.write_text(json.dumps({"artist": {"only": "images"}}),
+                            encoding="utf-8")
+        before = settings.read_text(encoding="utf-8")
+        web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y", "--dry-run")
+        cli.run()
+        assert settings.read_text(encoding="utf-8") == before
+
+    def test_redownload_missing_changes_what_the_plan_reports(
+            self, clean_cli_env, monkeypatch, capsys, no_downloads):
+        """On record but deleted is skipped by default and fetched with the flag."""
+        out = clean_cli_env / "out"
+        gallery = out / "artist"
+        (gallery / "web").mkdir(parents=True)
+        (gallery / "_downloaded.json").write_text(
+            json.dumps({"1004952679": "web/Web Art_1004952679.jpg"}),
+            encoding="utf-8")
+
+        def run_with(*extra):
+            web = FakeWebClient(pages=[{"results": [web_item()],
+                                        "hasMore": False}])
+            monkeypatch.setattr(cli, "WebClient", lambda: web)
+            set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                     "--client-id", "x", "--client-secret", "y", "--dry-run",
+                     *extra)
+            cli.run()
+            return capsys.readouterr().out
+
+        assert "1 would be skipped, so 0 would be fetched." in run_with()
+        assert ("0 would be skipped, so 1 would be fetched."
+                in run_with("--redownload-missing"))
+
+    def test_it_does_not_offer_to_download_what_it_will_not_download(
+            self, clean_cli_env, monkeypatch, no_downloads):
+        """The watchlist prompt is still asked -- a dry run walks every listing,
+        which is what makes a watchlist long -- but not in those words."""
+        asked = []
+        monkeypatch.setattr(cli, "fetch_watching", lambda client: ["alice", "bob"])
+        monkeypatch.setattr(cli, "sync_gallery",
+                            lambda client, username, *a, **k: sync.new_stats())
+        monkeypatch.setattr(cli, "confirm",
+                            lambda question: asked.append(question) or False)
+        set_argv(monkeypatch, "--watching", "--client-id", "x",
+                 "--client-secret", "y", "-o", str(clean_cli_env / "out"),
+                 "--dry-run")
+        cli.run()
+        assert asked == ["Work out what a sync of all 2 galleries would fetch?"]
+
+    def test_a_folder_wide_dry_run_does_not_call_itself_a_sync(
+            self, clean_cli_env, monkeypatch, capsys, no_downloads):
+        out = clean_cli_env / "out"
+        make_user_dir(out, "alice")
+        monkeypatch.setattr(cli, "sync_gallery",
+                            lambda client, username, *a, **k: sync.new_stats())
+        set_argv(monkeypatch, "-o", str(out), "--client-id", "x",
+                 "--client-secret", "y", "--dry-run")
+        cli.run()
+        printed = capsys.readouterr().out
+        assert "No profile given: checking 1 previously downloaded" in printed
+        assert "syncing" not in printed
+
+    def test_the_mature_lookup_is_counted_rather_than_spent(
+            self, clean_cli_env, monkeypatch, capsys, no_downloads):
+        # resolve_via_api is what costs quota; a dry run must not reach it.
+        monkeypatch.setattr(listing, "resolve_via_api",
+                            lambda *a, **k: pytest.fail("a dry run spent quota"))
+        web = FakeWebClient(pages=[{"results": [blocked_web_item()],
+                                    "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        set_argv(monkeypatch, "artist", "--web", "-o",
+                 str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y", "--dry-run")
+        cli.run()
+        assert "would need a listing lookup on the API first" in capsys.readouterr().out
+
+
+class TestSkippedUsers:
+    def write_users(self, root, entries):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "_users.json").write_text(json.dumps(entries), encoding="utf-8")
+
+    def test_a_skipped_user_is_left_out_of_a_bulk_sync(self, clean_cli_env,
+                                                       monkeypatch, capsys):
+        out = clean_cli_env / "out"
+        make_user_dir(out, "alice")
+        make_user_dir(out, "bob")
+        self.write_users(out, {"bob": {"skip": True}})
+        synced = []
+        monkeypatch.setattr(cli, "sync_gallery",
+                            lambda client, username, *a, **k:
+                            synced.append(username) or sync.new_stats())
+        set_argv(monkeypatch, "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+        assert synced == ["alice"]
+        assert "1 of 2 user(s) marked skip" in capsys.readouterr().out
+
+    def test_naming_the_profile_outranks_the_file(self, clean_cli_env,
+                                                  monkeypatch):
+        """Typing a name is as explicit as a request gets; skip does not veto it."""
+        out = clean_cli_env / "out"
+        self.write_users(out, {"bob": {"skip": True}})
+        synced = []
+        monkeypatch.setattr(cli, "sync_gallery",
+                            lambda client, username, *a, **k:
+                            synced.append(username) or sync.new_stats())
+        set_argv(monkeypatch, "bob", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y")
+        cli.run()
+        assert synced == ["bob"]
+
+    def test_skipping_everyone_says_so_instead_of_running_empty(
+            self, clean_cli_env, monkeypatch):
+        out = clean_cli_env / "out"
+        make_user_dir(out, "alice")
+        self.write_users(out, {"alice": {"skip": True}})
+        set_argv(monkeypatch, "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y")
+        with pytest.raises(SystemExit, match="Every user is marked skip"):
+            cli.run()
 
 
 class TestDiscoverUsers:

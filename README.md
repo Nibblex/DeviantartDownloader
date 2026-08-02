@@ -102,6 +102,8 @@ deviantart-downloader username --only mature      # download only the mature wor
 deviantart-downloader username --only literature mature  # ...and only the mature literature
 deviantart-downloader username --since 2024-01-01  # only works published since that date
 deviantart-downloader username --until 2023-12-31  # only works published up to that date (inclusive)
+deviantart-downloader username --dry-run      # say what would be fetched, fetch nothing
+deviantart-downloader username --verify       # check what is on disk against its own record
 deviantart-downloader username -q             # only results: no per-work progress lines
 deviantart-downloader username --full         # walk the entire gallery listing
 deviantart-downloader username --force-api    # route everything through the API
@@ -156,11 +158,16 @@ WARNING: the API listing does not report whether a work was upscaled with AI, so
 {
   "someartist": { "only": "images, no-ai" },
   "aWriter":    { "only": "literature", "literature-format": "html" },
-  "everything": { "only": "" }
+  "everything": { "only": "" },
+  "onHold":     { "skip": true }
 }
 ```
 
 Selectors read exactly as they do on the command line — one string or a list, spaces or commas — and an empty `only` means everything for that user. Usernames are matched whatever their case, and `literature_format` is accepted alongside `literature-format`.
+
+**`"skip": true` leaves a user out of a batch** — a re-sync of the output folder, or `--watching` — without deleting anything you already have from them. There is no `--skip` flag to go with it, because leaving one user out is a standing decision about that user and never about the run as a whole. Naming them on the command line still works: typing `deviantart-downloader onHold` is as explicit as a request gets, and the file does not overrule it.
+
+The decision is made from the name alone, before anything is fetched, which is the point — a user dropped after the listing would already have cost the listing. That is also why a rename slips past it: the id that recognises one only arrives with the listing this is refusing to spend, so a renamed user goes on being synced until some run meets them under the new name and re-keys the entry.
 
 **A flag you type outranks the file**, which was written before this run. Highest wins:
 
@@ -282,6 +289,47 @@ Published within --since 2024-01-01: 42 work(s)
 That last line is the one figure a summary cannot read off the profile: the folder counts both routes publish are totals, with no breakdown by date, so answering it means walking the gallery listing. `--since` bounds that walk, which is what makes it affordable — a recent window costs a page or two, while `--until` on its own has to walk back to the bound.
 
 So a plain `--info` still costs the two website round trips per user it always has, and only asking for a range makes it read the listing. On the website route that is still free; under `--force-api` it is quota, and `--watching --info --since` multiplies it by the size of your watchlist.
+
+### Seeing what a run would do (`--dry-run`)
+
+Lists the gallery, applies every filter, works out which route each work would take — and stops there.
+
+```
+Total works found: 160
+
+Dry run: nothing is downloaded, and nothing is written.
+  160 work(s) selected: 148 via the website (web/), 12 via the API (api/).
+  131 would be skipped, so 29 would be fetched.
+  Reaching those 12 would need a listing lookup on the API first, which this did not spend.
+```
+
+Nothing is written: not the gallery folder, not `_metadata.json`, and not `_users.json` either — an ordinary run records the id that keeps a rename followable, and a dry run gives that up rather than write anything at all. The last line is the point of the exercise: turning a mature work into something downloadable costs a page of the API's own listing, so a dry run counts those works instead of resolving them. Spending quota to answer a question about spending quota would defeat it.
+
+The count reads the download record *and* the disk, because that is what a real run consults — being on record is not enough on its own, since `--redownload-missing` fetches back exactly the works whose file has gone, and `--redownload-blurred` revisits ones that are still there. Pass those flags to the dry run and the numbers move with them. It is still what would be *attempted* rather than what would land: a work can turn out to have no file to offer, or fail once asked for.
+
+Worth reaching for before `--watching`, where the alternative is starting the thing and watching what happens.
+
+### Checking what you already have (`--verify`)
+
+Reads the download record and compares it with the disk. It repairs nothing, downloads nothing, and needs no credentials — a copy can be checked by someone who never registered an application.
+
+```
+User: artist — https://www.deviantart.com/artist
+  1373 recorded work(s).
+  2 on record but not on disk:
+    - web/Some Art_1004952679.jpg
+    - api/Mature Art_222222222.jpg
+    Pass --redownload-missing to fetch these again; left alone, the record keeps them deleted.
+  1 empty file(s):
+    - web/Half Written_333.txt
+    Delete them and pass --redownload-missing; while they exist the run counts them as already downloaded.
+```
+
+With a profile it checks that user; without one, every user in the output folder. It **exits non-zero when it finds something**, so a script can ask "is my copy intact?" without reading the output back.
+
+Three things it looks for: works the record claims that are not on disk, files of zero bytes (what an interrupted write leaves, and what every other check would call present), and `.part` files an interrupted run left behind. That last kind is harmless — a transfer only ever continues one within the call that made it — but knowing they are there is the difference between tidying up and wondering.
+
+Nothing is repaired, deliberately: the two answers a repair could give — fetch it again, or accept that it is gone — are yours to choose between, and both already have flags.
 
 ### Replacing copies you saved blurred (`--redownload-blurred`)
 

@@ -35,23 +35,27 @@ FILENAME = "_users.json"
 # below pairs each with the reader that validates its value.
 ONLY = "only"
 FORMAT = "literature-format"
+# Not a flag: there is no --skip, because leaving a user out of a batch is a
+# standing decision about that user and never about the run as a whole.
+SKIP = "skip"
 # Written by the tool rather than by hand: what a rename is recognised by.
 IDS = "ids"
 
 
 def load_overrides(path: str | None, output_root: Path,
-                   locked: frozenset[str] = frozenset()) -> "UserOverrides":
+                   locked: frozenset[str] = frozenset(),
+                   read_only: bool = False) -> "UserOverrides":
     """The settings file to read: the one named, or the one the output folder holds.
 
     A file asked for by name and not there is a typo worth stopping for; the
     default location simply has nothing to say when nobody put a file in it.
     """
     if not path:
-        return UserOverrides(output_root / FILENAME, locked)
+        return UserOverrides(output_root / FILENAME, locked, read_only)
     chosen = Path(path).expanduser()
     if not chosen.is_file():
         sys.exit(f"No per-user settings file at {chosen}.")
-    return UserOverrides(chosen, locked)
+    return UserOverrides(chosen, locked, read_only)
 
 
 class UserOverrides:
@@ -64,9 +68,13 @@ class UserOverrides:
     and would bite the first run that leaves the flag off.
     """
 
-    def __init__(self, path: Path, locked: frozenset[str] = frozenset()):
+    def __init__(self, path: Path, locked: frozenset[str] = frozenset(),
+                 read_only: bool = False):
         self.path = path
         self.locked = frozenset(locked)
+        # What a run that promises to write nothing sets: the file is still
+        # read and still applied, it is just never learned from.
+        self.read_only = read_only
         self._entries = _read(path)
         for username, entry in self._entries.items():
             _settings(entry, username, path)
@@ -96,9 +104,32 @@ class UserOverrides:
                     for name, value in _settings(self._entries[key], key,
                                                  self.path).items()
                     if name not in self.locked}
-        if settings:
-            say(f"  {self.path.name}: {_describe(settings)}")
+        # Read off the description rather than the dict: an entry may hold
+        # settings this line has nothing to say about, `skip` being one, and
+        # announcing the file with nothing after the colon helps nobody.
+        if described := _describe(settings):
+            say(f"  {self.path.name}: {described}")
         return settings.get(ONLY, only), settings.get(FORMAT, text_format)
+
+    def skips(self, username: str) -> bool:
+        """True when the file says to leave this user out of a batch.
+
+        Answered by name alone, and before anything has been fetched -- which
+        is the whole point of the setting: a user dropped after the listing
+        would already have cost the listing, and on the API route that is the
+        thing being rationed.
+
+        Paying nothing is what rules out following a rename here. The id that
+        recognises one only arrives with the listing this is refusing to spend,
+        so a renamed user goes on being synced until some run meets them under
+        the new name and re-keys the entry. Worth knowing rather than worth
+        fixing: the alternative costs every skipped user a listing, every run.
+        """
+        wanted = username.casefold()
+        key = next((k for k in self._entries if k.casefold() == wanted), None)
+        if key is None:
+            return False
+        return bool(_settings(self._entries[key], key, self.path).get(SKIP))
 
     def shadowed(self) -> frozenset[str]:
         """The settings the file has an answer for that the command line locked.
@@ -151,7 +182,13 @@ class UserOverrides:
         Nothing downloaded depends on this: what is being written is the id
         that would let a *later* rename be followed, so a read-only file costs
         that convenience rather than the gallery being synced.
+
+        A --dry-run does not write it at all. Learning an id is a small write
+        and a useful one, but a run that says it writes nothing cannot make an
+        exception for the file it happens to find convenient.
         """
+        if self.read_only:
+            return
         try:
             write_json(self.path, self._entries)
         except OSError as e:
@@ -225,9 +262,27 @@ def _format(value, username: str, path: Path) -> str:
     return chosen
 
 
+def _skip(value, username: str, path: Path) -> bool:
+    """An entry's `skip`, which is plainly true or false.
+
+    JSON has real booleans, but the same words `.env` accepts are taken too:
+    somebody who has written DA_QUIET=false should not have to find out that
+    this file spells it differently.
+    """
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    sys.exit(f'{path}: "{username}" asks skip for {value!r}, which must be '
+             "true or false.")
+
+
 # What an entry may set, and how each value is read. A setting is a row here
 # and a reader above, rather than another branch in _settings.
-SETTINGS = {ONLY: _only, FORMAT: _format}
+SETTINGS = {ONLY: _only, FORMAT: _format, SKIP: _skip}
 
 
 def _describe(settings: dict) -> str:
