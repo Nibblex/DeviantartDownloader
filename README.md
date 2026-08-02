@@ -427,6 +427,7 @@ The package is layered bottom-up, each module depending only on the ones above i
 
 | Module | Responsibility |
 | --- | --- |
+| `__version__.py` | The version, written once; `pyproject.toml` reads it from here |
 | `constants.py` | Endpoints, limits and the shared cancellation flag |
 | `config.py` | `.env` files and `DA_*` environment variables |
 | `naming.py` | Usernames, file names, and the work and user ids each route reports |

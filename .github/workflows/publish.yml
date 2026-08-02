@@ -34,11 +34,21 @@ jobs:
         with:
           python-version: "3.14"
       - name: Check the tag matches the packaged version
+        # Loaded as a standalone file rather than imported: importing the
+        # package pulls in __init__, which exits when requests is missing, and
+        # this job installs only the build tooling. It is the same file
+        # setuptools reads for the version it stamps on the wheel.
         run: |
-          version=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          version=$(python -c "
+          import importlib.util
+          spec = importlib.util.spec_from_file_location(
+              'v', 'deviantart_downloader/__version__.py')
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          print(module.__version__)")
           tag="${GITHUB_REF_NAME#v}"
           if [ "$version" != "$tag" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match the version in pyproject.toml ($version)"
+            echo "::error::tag $GITHUB_REF_NAME does not match __version__ in deviantart_downloader/__version__.py ($version)"
             exit 1
           fi
           echo "Publishing version $version"
