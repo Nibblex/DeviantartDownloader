@@ -3,6 +3,7 @@
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from urllib.parse import unquote, urlparse
 
 from .constants import API_SUBDIR, WEB_BASE, WEB_SUBDIR
@@ -95,6 +96,43 @@ def deviation_title(dev: dict) -> str:
 def content_src(dev: dict) -> str:
     """The URL a listing entry offers for a work, or "" when it offers none."""
     return (dev.get("content") or {}).get("src") or ""
+
+
+# The website writes an offset as "-0700" and sometimes ends a stamp with "Z".
+# Python 3.10's fromisoformat, which this project still supports, accepts
+# neither, so both are rewritten into the one spelling every version parses.
+_ISO_OFFSET_RE = re.compile(r"([+-]\d{2})(\d{2})$")
+
+
+def deviation_time(dev: dict) -> datetime | None:
+    """When a work was published, in UTC, or None when the listing does not say.
+
+    The two routes disagree about the format the way they disagree about ids:
+    the API reports published_time as a Unix timestamp inside a string, the
+    website as an ISO 8601 stamp carrying an offset. Both are read here so that
+    everything above compares datetimes rather than formats.
+
+    The answer is always aware and always UTC. A naive datetime cannot be
+    compared with an aware one -- that raises rather than returning False --
+    and a listing that mixed the two would fail on whichever work came first.
+    """
+    raw = str(dev.get("published_time") or "").strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if raw.endswith(("Z", "z")):
+        raw = raw[:-1] + "+00:00"
+    try:
+        stamp = datetime.fromisoformat(_ISO_OFFSET_RE.sub(r"\1:\2", raw))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
 
 
 def deviation_suffix(dev: dict) -> str:

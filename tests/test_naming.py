@@ -1,5 +1,7 @@
 """Usernames, file names and the deviation key shared by both routes."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from deviantart_downloader import web as web_mod
@@ -113,6 +115,46 @@ class TestUserIds:
         # the same user the two values differ.
         assert naming.user_ids([self.WEB_WORK, make_dev()]) == {
             "web": str(WEB_USER_ID), "api": API_USER_ID}
+
+
+class TestDeviationTime:
+    """The routes disagree about the format, as they do about ids."""
+
+    UTC = datetime(2023, 7, 10, 12, 34, 56, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("raw", [
+        "1688992496",                 # the API: a Unix timestamp in a string
+        "2023-07-10T12:34:56+00:00",  # ISO with an offset spelled out
+        "2023-07-10T12:34:56Z",       # ...and the "Z" 3.10 will not parse
+        "2023-07-10T12:34:56z",
+        "2023-07-10T12:34:56",        # no offset at all: read as UTC
+    ])
+    def test_every_spelling_lands_on_the_same_instant(self, raw):
+        assert naming.deviation_time({"published_time": raw}) == self.UTC
+
+    def test_an_offset_without_a_colon_is_understood(self):
+        # How the website writes it, and the other spelling 3.10 rejects.
+        assert naming.deviation_time(
+            {"published_time": "2023-07-10T12:34:56-0700"}
+        ) == datetime(2023, 7, 10, 19, 34, 56, tzinfo=timezone.utc)
+
+    def test_the_answer_is_always_aware(self):
+        # A naive datetime cannot be compared with an aware one: it raises.
+        for raw in ("1688992496", "2023-07-10T12:34:56", "2023-07-10T12:34:56-0700"):
+            assert naming.deviation_time({"published_time": raw}).tzinfo is not None
+
+    @pytest.mark.parametrize("dev", [
+        {},                                     # the listing carried no date
+        {"published_time": ""},
+        {"published_time": None},
+        {"published_time": "not a date"},
+        {"published_time": "2023-13-45"},       # parses as neither
+    ])
+    def test_what_cannot_be_read_is_not_guessed(self, dev):
+        assert naming.deviation_time(dev) is None
+
+    def test_an_out_of_range_timestamp_is_not_fatal(self):
+        assert naming.deviation_time({"published_time": "9" * 30}) is None
 
 
 class TestClampWixmpBlur:

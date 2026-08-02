@@ -1,5 +1,7 @@
 """The statistics accumulators and the detailed end-of-run summary."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from deviantart_downloader import sync
@@ -208,6 +210,99 @@ class TestParseOnly:
         """--only reads every word after it, so `--only images artist` lands here."""
         with pytest.raises(SystemExit, match="put it before --only"):
             sync.parse_only(["images", "artist"])
+
+
+class TestParseDate:
+    def test_a_bare_date_is_read_as_utc_midnight(self):
+        assert sync.parse_date("2024-03-05", "--since") == datetime(
+            2024, 3, 5, tzinfo=timezone.utc)
+
+    def test_until_takes_a_bare_date_to_mean_the_whole_day(self):
+        # Read as the instant the day begins, --until would silently drop
+        # almost all of the day it names.
+        assert sync.parse_date("2024-03-05", "--until", end_of_day=True) == datetime(
+            2024, 3, 5, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+    def test_a_spelled_out_time_is_taken_as_written(self):
+        assert sync.parse_date("2024-03-05T00:00:00", "--until",
+                               end_of_day=True) == datetime(
+            2024, 3, 5, tzinfo=timezone.utc)
+
+    def test_an_offset_is_honoured(self):
+        assert sync.parse_date("2024-03-05T12:00:00+02:00", "--since") == datetime(
+            2024, 3, 5, 10, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("value", ["ayer", "05/03/2024", "", "2024-13-01"])
+    def test_a_value_that_is_not_a_date_exits_naming_the_flag(self, value):
+        with pytest.raises(SystemExit, match="--since"):
+            sync.parse_date(value, "--since")
+
+
+class TestFilterByDate:
+    OLD = {"published_time": "2023-01-01T00:00:00Z"}
+    MID = {"published_time": "2024-06-01T00:00:00Z"}
+    NEW = {"published_time": "2025-01-01T00:00:00Z"}
+    UNDATED = {"title": "the listing carried no date"}
+
+    def since(self):
+        return sync.parse_date("2024-01-01", "--since")
+
+    def until(self):
+        return sync.parse_date("2024-12-31", "--until", end_of_day=True)
+
+    def test_no_bounds_hands_back_the_same_list(self):
+        works = [self.OLD, self.NEW]
+        kept, dropped = sync.filter_by_date(works, None, None)
+        assert kept is works and dropped == 0
+
+    def test_since_keeps_the_bound_and_everything_after(self):
+        kept, dropped = sync.filter_by_date(
+            [self.OLD, self.MID, self.NEW], self.since(), None)
+        assert kept == [self.MID, self.NEW] and dropped == 1
+
+    def test_until_keeps_the_bound_and_everything_before(self):
+        kept, dropped = sync.filter_by_date(
+            [self.OLD, self.MID, self.NEW], None, self.until())
+        assert kept == [self.OLD, self.MID] and dropped == 1
+
+    def test_both_bounds_narrow_from_each_side(self):
+        kept, dropped = sync.filter_by_date(
+            [self.OLD, self.MID, self.NEW], self.since(), self.until())
+        assert kept == [self.MID] and dropped == 2
+
+    def test_the_bounds_are_inclusive(self):
+        edge = {"published_time": "2024-01-01T00:00:00Z"}
+        assert sync.filter_by_date([edge], self.since(), None) == ([edge], 0)
+
+    def test_the_last_moment_of_an_until_day_is_still_inside(self):
+        edge = {"published_time": "2024-12-31T23:59:59Z"}
+        assert sync.filter_by_date([edge], None, self.until()) == ([edge], 0)
+
+    def test_a_work_the_listing_gave_no_date_for_is_kept(self):
+        """The lopsidedness --only has on the axes only the website reports.
+
+        A bound narrows the run by what the listing said; it does not discard a
+        work over a fact the listing never carried.
+        """
+        assert sync.filter_by_date(
+            [self.UNDATED], self.since(), self.until()) == ([self.UNDATED], 0)
+
+    def test_an_api_timestamp_is_compared_like_a_website_one(self):
+        # 2024-06-01T00:00:00Z, as the API spells it.
+        api_work = {"published_time": "1717200000"}
+        kept, _ = sync.filter_by_date([api_work], self.since(), self.until())
+        assert kept == [api_work]
+
+
+class TestDateRangeLabel:
+    def test_names_the_flags_that_set_the_bounds(self):
+        since = sync.parse_date("2024-01-01", "--since")
+        until = sync.parse_date("2024-12-31", "--until", end_of_day=True)
+        assert sync.date_range_label(since, until) == (
+            "--since 2024-01-01 --until 2024-12-31")
+        assert sync.date_range_label(since, None) == "--since 2024-01-01"
+        assert sync.date_range_label(None, until) == "--until 2024-12-31"
+        assert sync.date_range_label(None, None) == ""
 
 
 class TestAddStats:

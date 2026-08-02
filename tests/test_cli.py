@@ -79,6 +79,30 @@ class TestRun:
         # A profile asked for by name must fail loudly if it is gone.
         assert seen["skip_missing"] is False
 
+    def test_info_passes_the_date_bounds_through(self, clean_cli_env, monkeypatch,
+                                                 no_downloads):
+        seen = {}
+        monkeypatch.setattr(cli, "print_profiles",
+                            lambda client, web, names, **kw: seen.update(
+                                names=names, **kw))
+        set_argv(monkeypatch, "artist", "--client-id", "x", "--client-secret", "y",
+                 "--info", "--since", "2024-01-01", "--until", "2024-06-30")
+        cli.run()
+        assert seen["since"].year == 2024 and seen["since"].month == 1
+        # --until names a whole day, so it lands on the last moment of it.
+        assert seen["until"].month == 6 and seen["until"].hour == 23
+
+    def test_info_without_bounds_passes_none(self, clean_cli_env, monkeypatch,
+                                             no_downloads):
+        seen = {}
+        monkeypatch.setattr(cli, "print_profiles",
+                            lambda client, web, names, **kw: seen.update(
+                                names=names, **kw))
+        set_argv(monkeypatch, "artist", "--client-id", "x", "--client-secret", "y",
+                 "--info")
+        cli.run()
+        assert seen["since"] is None and seen["until"] is None
+
     def test_gallery_without_profile_exits(self, clean_cli_env, monkeypatch):
         set_argv(monkeypatch, "--client-id", "x", "--client-secret", "y",
                  "-g", "Sketches")
@@ -248,6 +272,72 @@ class TestRun:
         assert (gallery / "web" / "My Poem_1260299235.txt").is_file()
         assert not list((gallery / "web").glob("*.jpg"))
         assert "--only literature): skipped 1 of 2 work(s)" in capsys.readouterr().out
+
+    def test_since_downloads_only_what_is_new_enough(self, clean_cli_env,
+                                                     monkeypatch, capsys):
+        old = web_item(deviationId=111, title="Old Art",
+                       url="https://www.deviantart.com/artist/art/Old-Art-111",
+                       publishedTime="2023-03-01T00:00:00-0700")
+        new = web_item(deviationId=222, title="New Art",
+                       url="https://www.deviantart.com/artist/art/New-Art-222",
+                       publishedTime="2024-06-01T00:00:00-0700")
+        web = FakeWebClient(pages=[{"results": [new, old], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y",
+                 "-w", "1", "--since", "2024-01-01")
+        cli.run()
+
+        gallery = out / "artist" / "web"
+        assert (gallery / "New Art_222.jpg").is_file()
+        assert not (gallery / "Old Art_111.jpg").exists()
+        assert "--since 2024-01-01): skipped 1 of 2 work(s)" in capsys.readouterr().out
+
+    def test_until_includes_the_whole_day_it_names(self, clean_cli_env,
+                                                   monkeypatch, capsys):
+        # Read as the instant the day begins, --until would drop this work.
+        late = web_item(deviationId=333, title="Late Art",
+                        url="https://www.deviantart.com/artist/art/Late-Art-333",
+                        publishedTime="2024-06-01T23:30:00+00:00")
+        web = FakeWebClient(pages=[{"results": [late], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        monkeypatch.setattr(downloads, "download_file", fake_download)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y",
+                 "-w", "1", "--until", "2024-06-01")
+        cli.run()
+        assert (out / "artist" / "web" / "Late Art_333.jpg").is_file()
+
+    def test_bounds_the_wrong_way_round_are_rejected(self, clean_cli_env,
+                                                     monkeypatch):
+        set_argv(monkeypatch, "artist", "--web", "-o", str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y",
+                 "--since", "2025-01-01", "--until", "2024-01-01")
+        with pytest.raises(SystemExit, match="is after --until"):
+            cli.run()
+
+    def test_a_date_that_cannot_be_read_is_rejected(self, clean_cli_env, monkeypatch):
+        set_argv(monkeypatch, "artist", "--web", "-o", str(clean_cli_env / "out"),
+                 "--client-id", "x", "--client-secret", "y",
+                 "--since", "ayer")
+        with pytest.raises(SystemExit, match="--since takes a date"):
+            cli.run()
+
+    def test_a_date_range_matching_nothing_is_not_fatal(self, clean_cli_env,
+                                                        monkeypatch, capsys):
+        old = web_item(publishedTime="2019-01-01T00:00:00+00:00")
+        web = FakeWebClient(pages=[{"results": [old], "hasMore": False}])
+        monkeypatch.setattr(cli, "WebClient", lambda: web)
+        out = clean_cli_env / "out"
+        set_argv(monkeypatch, "artist", "--web", "-o", str(out),
+                 "--client-id", "x", "--client-secret", "y",
+                 "-w", "1", "--since", "2024-01-01")
+        cli.run()                                          # no SystemExit
+        assert "No work to download in this gallery (--since 2024-01-01)." \
+            in capsys.readouterr().out
 
     def test_only_with_no_matches_is_not_fatal(self, clean_cli_env, monkeypatch, capsys):
         web = FakeWebClient(pages=[{"results": [web_item()], "hasMore": False}])

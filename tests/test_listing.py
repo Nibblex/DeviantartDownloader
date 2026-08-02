@@ -1,5 +1,7 @@
 """Walking gallery listings over both routes, and pairing them up."""
 
+from datetime import datetime, timezone
+
 import pytest
 
 from deviantart_downloader import manifest as manifest_mod
@@ -99,6 +101,86 @@ class TestFetchGalleryEarlyStop:
         ])
         deviations = listing.fetch_gallery(client, "artist", manifest=manifest)
         assert len(deviations) == 2
+
+
+class TestListingStopsAtTheSinceBound:
+    """Both routes list newest-first, so a page wholly below the bound ends it.
+
+    That is the point of doing this in the walk rather than in a filter after
+    it: on the API route every page not asked for is a request not spent.
+    """
+
+    SINCE = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    def api_pages(self):
+        return [
+            {"results": [make_dev(published_time="1717200000")],       # 2024-06
+             "has_more": True, "next_offset": 24},
+            {"results": [make_dev(deviationid="ffffeeee-0000",
+                                  published_time="1672531200")],       # 2023-01
+             "has_more": True, "next_offset": 48},
+            {"results": [make_dev(deviationid="aaaabbbb-0000",
+                                  published_time="1640995200")],       # 2022-01
+             "has_more": False},
+        ]
+
+    def test_the_api_walk_stops_at_the_first_page_wholly_older(self, capsys):
+        client = FakeClient(pages=self.api_pages())
+        deviations = listing.fetch_gallery(client, "artist", since=self.SINCE)
+        # The page below the bound is still fetched -- that is how it is found
+        # out -- but the one after it never is.
+        assert len(client.calls) == 2
+        assert len(deviations) == 2
+        assert "older than --since" in capsys.readouterr().out
+
+    def test_full_does_not_defeat_the_since_bound(self):
+        """--full is there to defeat the incremental stop, not an explicit bound."""
+        client = FakeClient(pages=self.api_pages())
+        listing.fetch_gallery(client, "artist", since=self.SINCE, full=True)
+        assert len(client.calls) == 2
+
+    def test_without_the_bound_every_page_is_walked(self):
+        client = FakeClient(pages=self.api_pages())
+        assert len(listing.fetch_gallery(client, "artist")) == 3
+        assert len(client.calls) == 3
+
+    def test_a_page_mixing_both_sides_keeps_the_walk_going(self):
+        client = FakeClient(pages=[
+            {"results": [make_dev(published_time="1717200000"),        # 2024-06
+                         make_dev(deviationid="1", published_time="1672531200")],
+             "has_more": True, "next_offset": 24},
+            {"results": [make_dev(deviationid="2", published_time="1717200000")],
+             "has_more": False},
+        ])
+        assert len(listing.fetch_gallery(client, "artist", since=self.SINCE)) == 3
+
+    def test_a_page_with_an_undated_work_does_not_stop_the_walk(self):
+        # An unknown date could be anything; guessing would end the walk on a
+        # work that belonged in it.
+        client = FakeClient(pages=[
+            {"results": [make_dev(published_time="1672531200"),        # 2023-01
+                         make_dev(deviationid="1")],                   # no date
+             "has_more": True, "next_offset": 24},
+            {"results": [make_dev(deviationid="2", published_time="1717200000")],
+             "has_more": False},
+        ])
+        assert len(listing.fetch_gallery(client, "artist", since=self.SINCE)) == 3
+
+    def test_the_website_walk_stops_the_same_way(self, capsys):
+        web = FakeWebClient(pages=[
+            {"results": [web_item(publishedTime="2024-06-01T00:00:00-0700")],
+             "hasMore": True, "nextOffset": 60},
+            {"results": [web_item(deviationId=2, url="x/art/b-2",
+                                  publishedTime="2023-01-01T00:00:00-0700")],
+             "hasMore": True, "nextOffset": 120},
+            {"results": [web_item(deviationId=3, url="x/art/c-3",
+                                  publishedTime="2022-01-01T00:00:00-0700")],
+             "hasMore": False},
+        ])
+        deviations = listing.fetch_gallery_web(web, "artist", since=self.SINCE)
+        assert len(web.calls) == 2
+        assert len(deviations) == 2
+        assert "older than --since" in capsys.readouterr().out
 
 
 class TestFetchGalleryWeb:

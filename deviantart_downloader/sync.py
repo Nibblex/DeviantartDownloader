@@ -3,6 +3,7 @@
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
@@ -13,7 +14,8 @@ from .downloads import process_deviation
 from .listing import list_gallery, resolve_via_api
 from .literature import is_text_work
 from .manifest import DownloadManifest
-from .naming import deviation_key, deviation_title, profile_label
+from .naming import (deviation_key, deviation_time, deviation_title,
+                     profile_label)
 from .resolved import ResolvedCache
 from .storage import read_json, write_json
 from .web import WebClient, needs_api
@@ -92,6 +94,62 @@ def parse_only(values) -> frozenset[str]:
                  "If that is the profile, put it before --only, which reads "
                  "every word that follows it.")
     return chosen
+
+
+def parse_date(value: str, flag: str, *, end_of_day: bool = False) -> datetime:
+    """A --since/--until bound: a plain date, or a full ISO 8601 timestamp.
+
+    A bare date names a whole day, so --until 2024-12-31 has to mean the end of
+    that day; read as the instant it begins it would silently drop almost all
+    of the day it names, which is the opposite of what asking for it meant. A
+    value that spells out a time is taken exactly as written, midnight included.
+
+    A value carrying no offset is read as UTC, which is what the works are
+    compared in.
+    """
+    text = str(value).strip()
+    try:
+        stamp = datetime.fromisoformat(text)
+    except ValueError:
+        sys.exit(f"{flag} takes a date as YYYY-MM-DD, or a full ISO 8601 "
+                 f"timestamp, not: {value!r}")
+    if end_of_day and "T" not in text and " " not in text:
+        stamp = stamp.replace(hour=23, minute=59, second=59, microsecond=999999)
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def date_range_label(since: datetime | None, until: datetime | None) -> str:
+    """The bounds as the flags that set them, for the lines that report them."""
+    parts = []
+    if since:
+        parts.append(f"--since {since:%Y-%m-%d}")
+    if until:
+        parts.append(f"--until {until:%Y-%m-%d}")
+    return " ".join(parts)
+
+
+def filter_by_date(deviations: list[dict], since: datetime | None,
+                   until: datetime | None) -> tuple[list[dict], int]:
+    """Keep the works published within the bounds. Returns (kept, dropped).
+
+    A work whose listing carries no publication date is kept, not dropped --
+    the same lopsidedness --only has on the axes only the website reports. A
+    bound should narrow the run by what the listing said, never discard a work
+    over a fact it never carried.
+    """
+    if since is None and until is None:
+        return deviations, 0
+    kept = []
+    for dev in deviations:
+        when = deviation_time(dev)
+        if when is None:
+            kept.append(dev)          # nothing was said; nothing is concluded
+        elif ((since is None or when >= since)
+                and (until is None or when <= until)):
+            kept.append(dev)
+    return kept, len(deviations) - len(kept)
 
 
 def _selectors(only) -> frozenset[str]:
@@ -337,6 +395,7 @@ def sync_gallery(
     full: bool = False, web: WebClient | None = None, gallery: str | None = None,
     text_format: str = "txt", only: frozenset[str] | None = None,
     overrides: "UserOverrides | None" = None,
+    since: datetime | None = None, until: datetime | None = None,
 ) -> dict | None:
     """Download every new work of one user. Returns the counts per status,
     or None when the gallery is empty.
@@ -389,7 +448,7 @@ def sync_gallery(
         try:
             deviations, from_web = list_gallery(client, web, username,
                                                 manifest=manifest, full=listing_full,
-                                                gallery=gallery)
+                                                gallery=gallery, since=since)
         except CancelledByUser:               # 'q' during a rate-limit wait
             _quit_before_download()
         if CANCEL.is_set():                   # 'q' between listing pages
@@ -405,8 +464,16 @@ def sync_gallery(
         if dropped:
             say(f"  Content filter (--only {' '.join(sorted(only))}): skipped "
                 f"{dropped} of {dropped + len(deviations)} work(s).")
+        deviations, out_of_range = filter_by_date(deviations, since, until)
+        if out_of_range:
+            say(f"  Date filter ({date_range_label(since, until)}): skipped "
+                f"{out_of_range} of {out_of_range + len(deviations)} work(s).")
         if not deviations:
-            print(f"No {' '.join(sorted(only))} to download in this gallery.")
+            # Only reachable once a filter emptied it: an empty listing already
+            # returned above, so one of the two always has something to name.
+            kind = " ".join(sorted(only)) if only else "work"
+            window = f" ({date_range_label(since, until)})" if since or until else ""
+            print(f"No {kind} to download in this gallery{window}.")
             return new_stats()
         say(f"\nTotal works found: {len(deviations)}\n")
 

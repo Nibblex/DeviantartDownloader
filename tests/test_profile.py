@@ -2,6 +2,7 @@
 
 import json
 import time
+from datetime import datetime, timezone
 
 import pytest
 import requests
@@ -9,7 +10,7 @@ import requests
 from deviantart_downloader import api, profile
 from deviantart_downloader.web import WebError
 
-from .conftest import FakeClient, FakeWebClient
+from .conftest import FakeClient, FakeWebClient, web_item
 
 
 def web_about(**about_overrides):
@@ -175,6 +176,89 @@ class TestGatherProfile:
         assert "falling back to the API" in capsys.readouterr().out
 
 
+class TestGatherProfileWithDateBounds:
+    """--info --since answers "how much has this user posted lately?"."""
+
+    SINCE = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    def gallery_pages(self):
+        return [
+            {"results": [web_item(publishedTime="2024-06-01T00:00:00+00:00"),
+                         web_item(deviationId=2, url="x/art/b-2",
+                                  publishedTime="2024-03-01T00:00:00+00:00")],
+             "hasMore": True, "nextOffset": 60},
+            {"results": [web_item(deviationId=3, url="x/art/c-3",
+                                  publishedTime="2019-01-01T00:00:00+00:00")],
+             "hasMore": False},
+        ]
+
+    def test_no_bound_never_walks_the_listing(self):
+        """A plain --info stays the two round trips per user it has always been."""
+        web = FakeWebClient(about=web_about(),
+                            folders=[{"name": "Featured", "size": 3}],
+                            pages=self.gallery_pages())
+        info = profile.gather_profile(FakeClient(), web, "artist")
+        assert "in_range" not in info
+        assert web.calls == []            # gallery_page was never reached
+
+    def test_a_bound_counts_the_works_inside_it(self):
+        web = FakeWebClient(about=web_about(),
+                            folders=[{"name": "Featured", "size": 3}],
+                            pages=self.gallery_pages())
+        info = profile.gather_profile(FakeClient(), web, "artist",
+                                      since=self.SINCE)
+        assert info["in_range"] == 2
+        assert info["range_label"] == "--since 2024-01-01"
+
+    def test_the_walk_stops_at_the_bound(self):
+        # The saving that makes this affordable: the page below the bound ends
+        # the listing, so a gallery of thousands is not read to answer.
+        web = FakeWebClient(about=web_about(), folders=[],
+                            pages=[
+            {"results": [web_item(publishedTime="2019-01-01T00:00:00+00:00")],
+             "hasMore": True, "nextOffset": 60},
+            {"results": [web_item(deviationId=9, url="x/art/i-9",
+                                  publishedTime="2018-01-01T00:00:00+00:00")],
+             "hasMore": False},
+        ])
+        info = profile.gather_profile(FakeClient(), web, "artist",
+                                      since=self.SINCE)
+        assert info["in_range"] == 0
+        assert len(web.calls) == 1        # the second page was never asked for
+
+    def test_both_bounds_are_reported_together(self):
+        web = FakeWebClient(about=web_about(), folders=[],
+                            pages=self.gallery_pages())
+        info = profile.gather_profile(
+            FakeClient(), web, "artist", since=self.SINCE,
+            until=datetime(2024, 3, 31, 23, 59, 59, tzinfo=timezone.utc))
+        assert info["in_range"] == 1      # only the March work
+        assert info["range_label"] == "--since 2024-01-01 --until 2024-03-31"
+
+
+class TestFormatProfileWithDateBounds:
+    def test_the_count_sits_below_the_folder_totals_it_qualifies(self):
+        text = profile.format_profile({
+            "username": "artist",
+            "galleries": [{"name": "Featured", "size": 1373}],
+            "range_label": "--since 2024-01-01", "in_range": 42,
+        })
+        assert "Published within --since 2024-01-01: 42 work(s)" in text
+        assert text.index("Galleries:") < text.index("Published within")
+
+    def test_none_of_it_shows_without_a_bound(self):
+        text = profile.format_profile({"username": "artist", "galleries": []})
+        assert "Published within" not in text
+
+    def test_a_count_of_zero_is_still_reported(self):
+        # "nothing since that date" is an answer, and the walk was paid for.
+        text = profile.format_profile({
+            "username": "artist", "galleries": [],
+            "range_label": "--since 2024-01-01", "in_range": 0,
+        })
+        assert "Published within --since 2024-01-01: 0 work(s)" in text
+
+
 class TestFormatProfile:
     def test_renders_the_present_fields(self):
         web = FakeWebClient(about=web_about(),
@@ -210,7 +294,7 @@ class TestPrintProfiles:
         """gather_profile that can be slow per user and can report a dead one."""
         delays = delays or {}
 
-        def gather(client, web, username):
+        def gather(client, web, username, *, since=None, until=None):
             if username in gone:
                 raise api.UserNotFoundError(f'User "{username}" not found.')
             time.sleep(delays.get(username, 0))
@@ -256,7 +340,7 @@ class TestPrintProfiles:
     def test_a_profile_blocked_to_us_is_skipped_like_a_gone_one(
             self, monkeypatch, capsys):
         """DeviantArt closes some profiles; that is not the run's problem."""
-        def gather(client, web, username):
+        def gather(client, web, username, *, since=None, until=None):
             if username == "blocked":
                 raise requests.HTTPError("400 Client Error: Bad Request")
             return {"username": username, "galleries": []}
