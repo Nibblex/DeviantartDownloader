@@ -47,9 +47,11 @@ each, listing and downloads use both, and sync and cli sit on top.
 import sys
 from importlib.util import find_spec
 
+from .__version__ import __version__
+
 if find_spec("requests") is None:
     sys.exit("Missing the 'requests' library. Install it with: pip install requests")
 
 from .cli import main, run
 
-__all__ = ["main", "run"]
+__all__ = ["__version__", "main", "run"]

@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deviantart-gallery-downloader"
-version = "3.7.0"
+# Read from deviantart_downloader/__version__.py, which is the one place it is
+# written; see [tool.setuptools.dynamic] below. Spelling it out here again
+# would be a second copy with nothing keeping the two in step.
+dynamic = ["version"]
 description = "Download full DeviantArt galleries, sparing the API quota for mature content"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -44,6 +47,12 @@ deviantart-downloader = "deviantart_downloader.cli:main"
 
 [tool.setuptools]
 packages = ["deviantart_downloader"]
+
+[tool.setuptools.dynamic]
+# setuptools reads the assignment straight out of the file, without importing
+# the package -- which it could not do on a build machine anyway, since
+# importing deviantart_downloader requires requests.
+version = { attr = "deviantart_downloader.__version__.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

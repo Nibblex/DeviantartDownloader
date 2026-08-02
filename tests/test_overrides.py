@@ -75,6 +75,57 @@ class TestSettingsApply:
         assert "--only images" in out and "--literature-format html" in out
 
 
+class TestSkip:
+    """Leaving a user out of a batch, answered before anything is fetched."""
+
+    def test_a_user_marked_skip_is_skipped(self, tmp_path):
+        conf = load(tmp_path, {"artist": {"skip": True}})
+        assert conf.skips("artist") is True
+
+    def test_the_name_is_matched_whatever_its_case(self, tmp_path):
+        conf = load(tmp_path, {"ArTiSt": {"skip": True}})
+        assert conf.skips("artist") is True
+
+    @pytest.mark.parametrize("entries", [
+        {},                                     # the file names nobody
+        {"artist": {"skip": False}},
+        {"artist": {"only": "images"}},         # named, but says nothing of skip
+        {"someone-else": {"skip": True}},
+    ])
+    def test_everyone_else_is_left_alone(self, tmp_path, entries):
+        assert load(tmp_path, entries).skips("artist") is False
+
+    @pytest.mark.parametrize("written,expected", [
+        (True, True), (False, False),
+        # The words .env already accepts, so nobody has to learn a second set.
+        ("true", True), ("yes", True), ("on", True), ("1", True),
+        ("false", False), ("no", False), ("off", False), ("0", False),
+    ])
+    def test_it_reads_the_same_booleans_env_does(self, tmp_path, written, expected):
+        conf = load(tmp_path, {"artist": {"skip": written}})
+        assert conf.skips("artist") is expected
+
+    def test_a_value_that_is_neither_ends_the_run(self, tmp_path):
+        with pytest.raises(SystemExit, match="must be true or false"):
+            load(tmp_path, {"artist": {"skip": "maybe"}})
+
+    def test_skip_alone_does_not_announce_an_empty_line(self, tmp_path, capsys):
+        """The line names the settings it applies, and skip is not one of them."""
+        conf = load(tmp_path, {"artist": {"skip": False}})
+        conf.for_user("artist", [WEB_WORK], None, "txt")
+        assert ov.FILENAME not in capsys.readouterr().out
+
+    def test_it_still_says_what_it_does_apply(self, tmp_path, capsys):
+        conf = load(tmp_path, {"artist": {"skip": False, "only": "images"}})
+        conf.for_user("artist", [WEB_WORK], None, "txt")
+        assert "--only images" in capsys.readouterr().out
+
+    def test_skip_leaves_the_other_settings_readable(self, tmp_path):
+        conf = load(tmp_path, {"artist": {"skip": True, "only": "literature"}})
+        assert conf.for_user("artist", [WEB_WORK], None, "txt") == (
+            frozenset({"literature"}), "txt")
+
+
 class TestLockedByTheCommandLine:
     """A flag given for the run outranks the file, which was written before it."""
 

@@ -1,10 +1,14 @@
 """The statistics accumulators and the detailed end-of-run summary."""
 
+import json
 from datetime import datetime, timezone
 
 import pytest
 
 from deviantart_downloader import sync
+from deviantart_downloader import web as web_mod
+
+from .conftest import blocked_web_item, make_dev, web_item
 
 
 class TestHumanSize:
@@ -303,6 +307,162 @@ class TestDateRangeLabel:
         assert sync.date_range_label(since, None) == "--since 2024-01-01"
         assert sync.date_range_label(None, until) == "--until 2024-12-31"
         assert sync.date_range_label(None, None) == ""
+
+
+class TestInspectGallery:
+    """Checking a gallery against its own record: read-only and offline."""
+
+    def gallery(self, tmp_path, entries, files=(), partials=()):
+        out = tmp_path / "artist"
+        (out / "web").mkdir(parents=True)
+        (out / "_downloaded.json").write_text(json.dumps(entries),
+                                              encoding="utf-8")
+        for name, content in files:
+            (out / name).write_bytes(content)
+        for name in partials:
+            (out / name).write_bytes(b"")
+        return tmp_path
+
+    def test_a_folder_that_was_never_downloaded_has_nothing_to_say(self, tmp_path):
+        assert sync.inspect_gallery(tmp_path, "nobody") is None
+
+    def test_a_whole_gallery_reports_clean(self, tmp_path):
+        root = self.gallery(tmp_path, {"111": "web/A_111.jpg"},
+                            files=[("web/A_111.jpg", b"data")])
+        damage = sync.inspect_gallery(root, "artist")
+        assert damage.recorded == 1
+        assert (damage.missing, damage.empty, damage.partial) == ([], [], [])
+
+    def test_a_recorded_work_with_no_file_is_reported(self, tmp_path):
+        root = self.gallery(tmp_path, {"111": "web/Gone_111.jpg"})
+        assert sync.inspect_gallery(root, "artist").missing == ["web/Gone_111.jpg"]
+
+    def test_an_empty_file_counts_as_damage_of_its_own(self, tmp_path):
+        # What an interrupted write leaves, and what every other check would
+        # happily call present.
+        root = self.gallery(tmp_path, {"111": "web/Empty_111.jpg"},
+                            files=[("web/Empty_111.jpg", b"")])
+        damage = sync.inspect_gallery(root, "artist")
+        assert damage.empty == ["web/Empty_111.jpg"] and damage.missing == []
+
+    def test_leftover_part_files_are_found_in_either_subfolder(self, tmp_path):
+        root = self.gallery(tmp_path, {}, partials=["web/Half_1.jpg.part",
+                                                    "Old_2.jpg.part"])
+        assert sync.inspect_gallery(root, "artist").partial == [
+            "Old_2.jpg.part", "web/Half_1.jpg.part"]
+
+    def test_it_writes_nothing_and_creates_nothing(self, tmp_path):
+        root = self.gallery(tmp_path, {"111": "web/Gone_111.jpg"})
+        before = {p: p.stat().st_mtime_ns for p in root.rglob("*")}
+        sync.inspect_gallery(root, "artist")
+        after = {p: p.stat().st_mtime_ns for p in root.rglob("*")}
+        assert before == after
+
+
+class TestVerificationLines:
+    def test_a_clean_gallery_says_so_in_one_line(self):
+        lines = sync.verification_lines("artist", sync.Damage(42, [], [], []))
+        assert "42 recorded work(s), all present." in lines[1]
+
+    def test_nothing_downloaded_is_not_damage(self):
+        lines = sync.verification_lines("artist", None)
+        assert "Nothing has been downloaded here." in lines[1]
+
+    def test_each_kind_of_damage_names_itself_and_what_to_do(self):
+        text = "\n".join(sync.verification_lines(
+            "artist", sync.Damage(3, ["web/a.jpg"], ["web/b.jpg"],
+                                  ["web/c.jpg.part"])))
+        assert "1 on record but not on disk:" in text
+        assert "--redownload-missing" in text
+        assert "1 empty file(s):" in text
+        assert "1 leftover .part file(s)" in text
+
+    def test_a_long_list_is_capped_rather_than_dumped(self):
+        many = [f"web/{i}.jpg" for i in range(25)]
+        text = "\n".join(sync.verification_lines("artist",
+                                                 sync.Damage(25, many, [], [])))
+        assert "... and 15 more" in text
+        assert "web/24.jpg" not in text
+
+
+class TestVerifyUsers:
+    def test_it_answers_false_when_anything_is_wrong(self, tmp_path, capsys):
+        out = tmp_path / "artist"
+        (out / "web").mkdir(parents=True)
+        (out / "_downloaded.json").write_text('{"111": "web/Gone_111.jpg"}',
+                                              encoding="utf-8")
+        assert sync.verify_users(tmp_path, ["artist"]) is False
+        assert "not on disk" in capsys.readouterr().out
+
+    def test_it_answers_true_when_there_is_nothing_to_report(self, tmp_path):
+        (tmp_path / "artist").mkdir()
+        assert sync.verify_users(tmp_path, ["artist"]) is True
+
+
+class TestPlanSummary:
+    def recorded_gallery(self, tmp_path, on_disk=True):
+        """A gallery whose record holds the plain web_item, file optional."""
+        from deviantart_downloader.manifest import DownloadManifest
+        (tmp_path / "web").mkdir(parents=True, exist_ok=True)
+        if on_disk:
+            (tmp_path / "web" / "Web Art_1004952679.jpg").write_bytes(b"data")
+        manifest = DownloadManifest(tmp_path)
+        manifest.add("1004952679", "web/Web Art_1004952679.jpg")
+        return manifest
+
+    def test_it_splits_the_routes_and_counts_what_is_already_here(self, tmp_path):
+        manifest = self.recorded_gallery(tmp_path)
+        normalised = [web_mod.normalize_web_deviation(d)
+                      for d in (web_item(), blocked_web_item())]
+        text = "\n".join(sync.plan_summary(normalised, manifest, True, tmp_path))
+        assert "nothing is downloaded, and nothing is written" in text
+        assert "2 work(s) selected: 1 via the website (web/), 1 via the API" in text
+        assert "1 would be skipped, so 1 would be fetched." in text
+
+    def test_it_says_the_api_lookup_was_not_spent(self, tmp_path):
+        normalised = [web_mod.normalize_web_deviation(blocked_web_item())]
+        text = "\n".join(sync.plan_summary(normalised, None, True, tmp_path))
+        assert "would need a listing lookup on the API first" in text
+
+    def test_an_api_listing_has_no_lookup_left_to_mention(self, tmp_path):
+        text = "\n".join(sync.plan_summary([make_dev()], None, False, tmp_path))
+        assert "listing lookup" not in text
+
+    def test_no_manifest_means_nothing_would_be_skipped(self, tmp_path):
+        normalised = [web_mod.normalize_web_deviation(web_item())]
+        text = "\n".join(sync.plan_summary(normalised, None, True, tmp_path))
+        assert "0 would be skipped, so 1 would be fetched." in text
+
+    def test_a_recorded_work_whose_file_is_gone_is_still_skipped_by_default(
+            self, tmp_path):
+        # The record is authoritative: a file you deleted stays deleted.
+        manifest = self.recorded_gallery(tmp_path, on_disk=False)
+        normalised = [web_mod.normalize_web_deviation(web_item())]
+        text = "\n".join(sync.plan_summary(normalised, manifest, True, tmp_path))
+        assert "1 would be skipped, so 0 would be fetched." in text
+
+    def test_redownload_missing_counts_the_deleted_ones_as_fetched(self, tmp_path):
+        """Being on record is not enough on its own -- this flag exists to
+        fetch back exactly the works whose file has gone."""
+        manifest = self.recorded_gallery(tmp_path, on_disk=False)
+        normalised = [web_mod.normalize_web_deviation(web_item())]
+        text = "\n".join(sync.plan_summary(normalised, manifest, True, tmp_path,
+                                           redownload_missing=True))
+        assert "0 would be skipped, so 1 would be fetched." in text
+
+    def test_redownload_blurred_counts_the_api_route_copies_as_fetched(
+            self, tmp_path):
+        from deviantart_downloader.manifest import DownloadManifest
+        (tmp_path / "api").mkdir(parents=True)
+        (tmp_path / "api" / "Mature Art_222222222.jpg").write_bytes(b"data")
+        manifest = DownloadManifest(tmp_path)
+        manifest.add("222222222", "api/Mature Art_222222222.jpg")
+        normalised = [web_mod.normalize_web_deviation(blocked_web_item())]
+        plain = "\n".join(sync.plan_summary(normalised, manifest, True, tmp_path))
+        repair = "\n".join(sync.plan_summary(normalised, manifest, True, tmp_path,
+                                             redownload_blurred=True))
+        assert "1 would be skipped, so 0 would be fetched." in plain
+        assert "0 would be skipped, so 1 would be fetched." in repair
 
 
 class TestAddStats:

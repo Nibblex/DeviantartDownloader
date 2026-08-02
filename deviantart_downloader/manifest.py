@@ -81,6 +81,15 @@ class DownloadManifest:
                 self._save_locked()
         return migrated
 
+    def recorded(self) -> list[tuple[str, str]]:
+        """Every work on record, as (key, path relative to the gallery folder).
+
+        A copy, sorted, and taken under the lock: a run checking its own record
+        does so while workers are still adding to it.
+        """
+        with self._lock:
+            return sorted(self._entries.items())
+
     def has(self, dev_id: str) -> bool:
         with self._lock:
             return self._key(dev_id) in self._entries
