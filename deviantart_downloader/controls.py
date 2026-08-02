@@ -318,9 +318,6 @@ class KeyboardControls:
         except (ValueError, OSError):
             return False
 
-    def _refresh(self):
-        _redraw()
-
     def _listen(self):
         shown = None
         while not self._stop.is_set() and not CANCEL.is_set():
@@ -332,13 +329,13 @@ class KeyboardControls:
                 left = round(hold_seconds())
                 if left != shown and (left or shown):
                     shown = left
-                    self._refresh()
+                    _redraw()
                 continue
             shown = None
             ch = self.stream.read(1)
             if not ch:
                 continue
             if apply_key(ch):
-                self._refresh()
+                _redraw()
             if ch.lower() == "q":
                 break

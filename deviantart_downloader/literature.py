@@ -24,8 +24,6 @@ KIND_TIPTAP = "tiptap"   # tiptap document, as a JSON string
 KIND_HTML = "html"       # an HTML fragment (legacy "writer" / API content)
 KIND_TEXT = "text"       # plain text (the listing excerpt)
 
-FORMATS = ("txt", "html")
-
 # tiptap nodes that stand on their own line; everything else is inline.
 _BLOCK_TYPES = {
     "paragraph", "heading", "blockquote", "listItem", "bulletList",
@@ -65,6 +63,21 @@ def classify_web_html(html_obj: object) -> tuple[str, str] | None:
     return kind, markup
 
 
+def _tiptap_nodes(markup: str) -> list:
+    """The top-level nodes of a tiptap document; none when it will not parse.
+
+    Shared by both renderers: parsing the JSON and unwrapping the outer
+    document is the same work whichever format the body is headed for, and an
+    unparseable document renders as nothing either way.
+    """
+    try:
+        doc = json.loads(markup)
+    except (ValueError, TypeError):
+        return []
+    root = (doc.get("document") if isinstance(doc, dict) else None) or doc
+    return (root or {}).get("content") or []
+
+
 # --- plain text -----------------------------------------------------------
 
 def _node_text(node: dict) -> str:
@@ -79,12 +92,7 @@ def _node_text(node: dict) -> str:
 
 
 def _tiptap_to_text(markup: str) -> str:
-    try:
-        doc = json.loads(markup)
-    except (ValueError, TypeError):
-        return ""
-    root = (doc.get("document") if isinstance(doc, dict) else None) or doc
-    return "".join(_node_text(n) for n in (root or {}).get("content") or [])
+    return "".join(_node_text(n) for n in _tiptap_nodes(markup))
 
 
 def _strip_html(markup: str) -> str:
@@ -144,12 +152,7 @@ def _tiptap_block(node: dict) -> str:
 
 
 def _tiptap_to_html(markup: str) -> str:
-    try:
-        doc = json.loads(markup)
-    except (ValueError, TypeError):
-        return ""
-    root = (doc.get("document") if isinstance(doc, dict) else None) or doc
-    return "\n".join(_tiptap_block(n) for n in (root or {}).get("content") or [])
+    return "\n".join(_tiptap_block(n) for n in _tiptap_nodes(markup))
 
 
 def _text_to_html(text: str) -> str:

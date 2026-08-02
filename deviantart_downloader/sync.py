@@ -177,8 +177,10 @@ def unreported_warnings(only: frozenset[str] | None,
 def human_size(nbytes: float) -> str:
     """Format a byte count as a human-readable string (e.g. "45.3 MB")."""
     size = float(nbytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
+    # TB is left out of the loop: it is the last unit, so there is nothing to
+    # divide by after it and the answer is whatever is left over.
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TB"
