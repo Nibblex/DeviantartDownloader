@@ -1,11 +1,14 @@
 """Walking a gallery listing, over either route, and pairing the two up."""
 
+from datetime import datetime
+
 from .api import DeviantArtClient
 from .constants import (API_SUBDIR, CANCEL, PAGE_LIMIT, WEB_PAGE_LIMIT,
                         WEB_SUBDIR, say, wait_if_paused)
 from .controls import set_progress
 from .manifest import DownloadManifest
-from .naming import deviation_key
+from .naming import deviation_key, deviation_time
+from .resolved import ResolvedCache
 from .web import WebClient, WebError, normalize_web_deviation
 
 
@@ -76,6 +79,7 @@ def resolve_folder_api(client: DeviantArtClient, username: str, name: str) -> st
 def fetch_gallery(
     client: DeviantArtClient, username: str, *, folder: str | None = None,
     manifest: DownloadManifest | None = None, full: bool = False,
+    since: datetime | None = None,
 ) -> list[dict]:
     """Walk the pages of a gallery (newest first) and return the deviations.
 
@@ -84,6 +88,10 @@ def fetch_gallery(
     False, pagination stops after the first page whose works are all already
     recorded: everything older was listed by a previous run. Failed downloads
     are never in the manifest, so they keep the walk going until they succeed.
+
+    `since` stops it for the other reason: a page entirely older than the bound
+    means the rest of the gallery is too, and every page not asked for is a
+    request not spent.
     """
     endpoint = f"gallery/{folder}" if folder else "gallery/all"
     deviations = []
@@ -107,15 +115,14 @@ def fetch_gallery(
         set_progress(f"listing {username}  {API_SUBDIR}  {len(deviations)} works")
         if not data.get("has_more"):
             break
-        if page_fully_downloaded(results, manifest, full):
-            say("  Every work on this page was already downloaded; stopping the "
-                "listing early (pass --full to walk the whole gallery).")
+        if reason := _stop_reason(results, manifest, full, since):
+            say(reason)
             break
         offset = data.get("next_offset") or offset + PAGE_LIMIT
     return deviations
 
 
-def page_fully_downloaded(results: list[dict], manifest: "DownloadManifest | None",
+def page_fully_downloaded(results: list[dict], manifest: DownloadManifest | None,
                           full: bool) -> bool:
     """True when every work on a listing page is already in the manifest."""
     if manifest is None or full or not results:
@@ -123,9 +130,46 @@ def page_fully_downloaded(results: list[dict], manifest: "DownloadManifest | Non
     return all((key := deviation_key(d)) and manifest.has(key) for d in results)
 
 
+def page_older_than(results: list[dict], since: datetime | None) -> bool:
+    """True when every work on a listing page predates `since`.
+
+    Both routes list newest-first, so a page entirely below the bound means the
+    walk has gone past it and everything after is older still: the pages that
+    would follow hold nothing the run could keep, and on the API route each of
+    them is a request. Unlike the manifest's early stop this one survives
+    --full, which is there to defeat the incremental stop, not a bound the
+    command line asked for in as many words.
+
+    A work whose date the listing does not carry stops this: it could be
+    anything, and guessing would end the walk on a work that belonged in it.
+    """
+    if since is None or not results:
+        return False
+    return all((when := deviation_time(d)) is not None and when < since
+               for d in results)
+
+
+def _stop_reason(results: list[dict], manifest: DownloadManifest | None,
+                 full: bool, since: datetime | None) -> str | None:
+    """The line to say when this page ends the walk, or None to carry on.
+
+    Both routes stop for the same two reasons and report them in the same
+    words, so the rules are stated once here rather than once per route -- the
+    same reason STATUSES and QUIET_STATUSES sit next to each other in sync.
+    """
+    if page_fully_downloaded(results, manifest, full):
+        return ("  Every work on this page was already downloaded; stopping the "
+                "listing early (pass --full to walk the whole gallery).")
+    if page_older_than(results, since):
+        return ("  Every work on this page is older than --since; stopping the "
+                "listing early.")
+    return None
+
+
 def fetch_gallery_web(
     web: WebClient, username: str, *, folderid: object = None,
     manifest: DownloadManifest | None = None, full: bool = False,
+    since: datetime | None = None,
 ) -> list[dict]:
     """Same walk as fetch_gallery, over the website listing and without OAuth.
 
@@ -146,9 +190,8 @@ def fetch_gallery_web(
         set_progress(f"listing {username}  {WEB_SUBDIR}  {len(deviations)} works")
         if not data.get("hasMore"):
             break
-        if page_fully_downloaded(results, manifest, full):
-            say("  Every work on this page was already downloaded; stopping the "
-                "listing early (pass --full to walk the whole gallery).")
+        if reason := _stop_reason(results, manifest, full, since):
+            say(reason)
             break
         offset = data.get("nextOffset") or offset + WEB_PAGE_LIMIT
     return deviations
@@ -157,6 +200,7 @@ def fetch_gallery_web(
 def list_gallery(
     client: DeviantArtClient, web: WebClient | None, username: str, *,
     manifest: DownloadManifest | None, full: bool, gallery: str | None = None,
+    since: datetime | None = None,
 ) -> tuple[list[dict], bool]:
     """Fetch the gallery listing, preferring the website over the API.
 
@@ -172,12 +216,13 @@ def list_gallery(
         try:
             folderid = resolve_folder_web(web, username, gallery) if gallery else None
             return fetch_gallery_web(web, username, folderid=folderid,
-                                     manifest=manifest, full=full), True
+                                     manifest=manifest, full=full,
+                                     since=since), True
         except WebError as e:
             print(f"  Website listing unavailable ({e}); falling back to the API.")
     folder = resolve_folder_api(client, username, gallery) if gallery else None
     return fetch_gallery(client, username, folder=folder,
-                         manifest=manifest, full=full), False
+                         manifest=manifest, full=full, since=since), False
 
 
 def _api_page(client: DeviantArtClient, endpoint: str, username: str,
@@ -193,7 +238,7 @@ def resolve_via_api(
     client: DeviantArtClient, username: str, blocked: list[dict],
     ordered: list[dict] | None = None, *,
     manifest: DownloadManifest, redownload: bool,
-    gallery: str | None = None, cache: "ResolvedCache | None" = None,
+    gallery: str | None = None, cache: ResolvedCache | None = None,
 ) -> list[dict]:
     """Look up the API entries of the works the website only serves blurred.
 

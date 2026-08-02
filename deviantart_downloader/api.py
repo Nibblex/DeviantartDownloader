@@ -8,7 +8,7 @@ from pathlib import Path
 
 import requests
 
-from .constants import (API_BASE, API_RATE, CANCEL, TOKEN_FILE, TOKEN_URL,
+from .constants import (API_BASE, API_RATE, TOKEN_FILE, TOKEN_URL,
                         USER_AGENT, sleep_or_cancel)
 from .controls import clear_hold, set_hold
 

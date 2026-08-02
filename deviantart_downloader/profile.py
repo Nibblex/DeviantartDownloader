@@ -9,13 +9,14 @@ summary, so a failure of one degrades gracefully.
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime
 
 from .api import UNREADABLE_PROFILE, DeviantArtClient
 from .constants import say
-from .listing import fetch_api_folders
+from .listing import fetch_api_folders, list_gallery
 from .literature import KIND_HTML, classify_web_html, render
 from .naming import profile_label
+from .sync import date_range_label, filter_by_date
 from .web import WebClient, WebError, web_media_url
 
 # 365.25-day years, matching how DeviantArt counts "Deviant for X years".
@@ -23,7 +24,8 @@ _SECONDS_PER_YEAR = 31_557_600
 
 
 def gather_profile(client: DeviantArtClient, web: WebClient | None,
-                   username: str) -> dict:
+                   username: str, *, since: datetime | None = None,
+                   until: datetime | None = None) -> dict:
     """Collect a profile's facts, stats and gallery folders into one dict.
 
     The API profile costs one request per user, which --watching --info over a
@@ -54,7 +56,30 @@ def gather_profile(client: DeviantArtClient, web: WebClient | None,
         _fill_missing(info, _from_api_profile(api))
         info["galleries"] = _folders(
             fetch_api_folders(client, username, calculate_size=True))
+    if since is not None or until is not None:
+        info["range_label"] = date_range_label(since, until)
+        info["in_range"] = _count_in_range(client, web, username, since, until)
     return info
+
+
+def _count_in_range(client: DeviantArtClient, web: WebClient | None,
+                    username: str, since: datetime | None,
+                    until: datetime | None) -> int:
+    """How many of a user's works fall within the date bounds.
+
+    The one part of a summary that has to walk the gallery listing: the folder
+    counts both routes publish are totals, with no breakdown by date, so there
+    is nothing cheaper to read the answer off. --since bounds the walk -- a page
+    wholly older than it ends the listing -- so asking about a recent window
+    costs a page or two, while asking about the whole gallery costs the gallery.
+
+    Which is why this is only done when a bound was actually given: a plain
+    --info stays the two round trips per user it has always been.
+    """
+    deviations, _ = list_gallery(client, web, username, manifest=None,
+                                 full=False, since=since)
+    kept, _ = filter_by_date(deviations, since, until)
+    return len(kept)
 
 
 def _fill_missing(info: dict, extra: dict):
@@ -262,12 +287,19 @@ def format_profile(info: dict) -> str:
         count = f" — {_num(g['size'])} items" if g.get("size") is not None else ""
         lines.append(f"  - {g['name']}{count}")
 
+    # Below the folder totals it qualifies, and only when a bound was given:
+    # this is the one figure that cost a walk of the listing to answer.
+    if info.get("in_range") is not None:
+        lines.append(f"Published within {info['range_label']}: "
+                     f"{_num(info['in_range'])} work(s)")
+
     return "\n".join(lines)
 
 
 def print_profiles(client: DeviantArtClient, web: WebClient | None,
                    usernames: list[str], *, workers: int = 1,
-                   skip_missing: bool = False) -> None:
+                   skip_missing: bool = False, since: datetime | None = None,
+                   until: datetime | None = None) -> None:
     """Print one summary per user; downloads nothing.
 
     The profiles are fetched concurrently and printed in the order asked for.
@@ -283,7 +315,8 @@ def print_profiles(client: DeviantArtClient, web: WebClient | None,
     """
     say("Fetching profile info...\n")
     with ThreadPoolExecutor(max_workers=max(workers, 1)) as pool:
-        pending = [pool.submit(gather_profile, client, web, name)
+        pending = [pool.submit(gather_profile, client, web, name,
+                               since=since, until=until)
                    for name in usernames]
         for index, (username, future) in enumerate(zip(usernames, pending)):
             if index:

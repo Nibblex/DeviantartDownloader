@@ -14,8 +14,8 @@ from .naming import extract_username, profile_label
 from .overrides import FILENAME, FORMAT, ONLY, load_overrides
 from .profile import print_profiles
 from .sync import (ONLY_FILTERS, add_stats, discover_users, fetch_watching,
-                   human_size, new_stats, parse_only, summary_lines,
-                   sync_gallery, worth_repairing)
+                   human_size, new_stats, parse_date, parse_only,
+                   summary_lines, sync_gallery, worth_repairing)
 from .web import WebClient
 
 
@@ -62,7 +62,10 @@ def run():
                              "and banner, bio, location, birthday, links, statistics, "
                              "galleries and their item counts) and exit without "
                              "downloading anything. Requires a profile, or "
-                             "--watching to summarise everyone you watch")
+                             "--watching to summarise everyone you watch. Given "
+                             "--since/--until it also reports how many works fall "
+                             "in the range, which is the one figure that costs a "
+                             "walk of the gallery listing to answer")
     parser.add_argument("-g", "--gallery", metavar="NAME",
                         help="Download only the gallery folder with this name "
                              "(case-insensitive) instead of the whole gallery. "
@@ -136,6 +139,21 @@ def run():
                              "Renames are followed: each entry records the id the "
                              "route reports for that user, so the settings move to "
                              "the new name instead of being lost")
+    parser.add_argument("--since", metavar="DATE",
+                        help="Keep only the works published on or after this date "
+                             "(YYYY-MM-DD, or a full ISO 8601 timestamp; no offset "
+                             "means UTC). Both routes list newest-first, so this "
+                             "also stops the listing walk once a page is entirely "
+                             "older -- on the API route, every page not asked for "
+                             "is a request not spent. With --info it reports how "
+                             "many works fall in the range instead of downloading "
+                             "them")
+    parser.add_argument("--until", metavar="DATE",
+                        help="Keep only the works published on or before this date. "
+                             "A bare date means the whole day, so --until 2024-12-31 "
+                             "includes that day. Older works still have to be walked "
+                             "past to reach, so unlike --since this narrows what is "
+                             "downloaded rather than what is listed")
     parser.add_argument("--redownload-blurred", action="store_true",
                         help="Fetch again the mature works whose local copy may be "
                              "the blurred placeholder a logged-out run settled "
@@ -171,6 +189,12 @@ def run():
                       else [os.environ.get("DA_ONLY", "")])
     text_format = (args.literature_format if args.literature_format is not None
                    else env_choice("DA_LITERATURE_FORMAT", "txt", TEXT_FORMATS))
+
+    since = parse_date(args.since, "--since") if args.since else None
+    until = parse_date(args.until, "--until", end_of_day=True) if args.until else None
+    if since and until and since > until:
+        sys.exit(f"--since {since:%Y-%m-%d} is after --until {until:%Y-%m-%d}, "
+                 "so no work could fall between them.")
 
     if args.web_workers < 1:
         sys.exit(f"The number of web workers must be at least 1 (got: {args.web_workers}).")
@@ -273,7 +297,8 @@ def run():
         # take the other summaries down with it.
         print_profiles(client, web, usernames, skip_missing=not single,
                        workers=args.web_workers if web is not None
-                       else args.api_workers)
+                       else args.api_workers,
+                       since=since, until=until)
         return
 
     totals = new_stats()
@@ -291,7 +316,7 @@ def run():
                 redownload_blurred=args.redownload_blurred,
                 full=args.full, web=web, gallery=args.gallery,
                 text_format=text_format, only=only,
-                overrides=overrides,
+                overrides=overrides, since=since, until=until,
             )
         except UNREADABLE_PROFILE as e:
             # A batch outlives the accounts in it. Whichever call found out this

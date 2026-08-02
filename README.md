@@ -25,6 +25,7 @@ Each route saves to its own subfolder inside the gallery folder. `--force-api` r
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
 - Run it with no arguments to re-sync every user already present in the output folder with their latest works, or with `--watching` to download every user your account watches.
 - Re-syncs are incremental: the gallery listing stops as soon as it reaches a page of already-downloaded works (`--full` forces a complete walk).
+- Restrict a run to a date range with `--since` / `--until`. Because both routes list newest-first, `--since` also stops the listing walk once a page is entirely older than the bound, so on the API route it is a saving in requests and not only a filter (see below).
 - Files you delete manually stay deleted: the download record (`_downloaded.json`) is authoritative, so deleted works are not downloaded again unless you pass `--redownload-missing`.
 - Saves the full metadata of every work to `_metadata.json`, including what the website knows about AI involvement: `is_ai_generated` (the flag behind the site's own "Suppress AI" filter, true for DreamUp works too), `is_upscaled` and `is_ai_use_disallowed`. Only the website listing carries these, so a work listed through the API records them as `null` — not known, rather than not AI.
 - Ends every run with a summary broken down by route and size (items and MB downloaded via the website vs. the API), plus a per-user breakdown when syncing several profiles.
@@ -74,6 +75,8 @@ DA_OUTPUT=~/Pictures/deviantart
 DA_FORCE_API=false
 ```
 
+`DA_WORKERS` is what `DA_WEB_WORKERS` was called before the API route got a cap of its own, and is still read when `DA_WEB_WORKERS` is unset, so an `.env` written for an older version keeps working.
+
 ## Usage
 
 ```bash
@@ -97,6 +100,8 @@ deviantart-downloader username --literature-format html  # save literature/journ
 deviantart-downloader username --only images       # download only images (skip literature/journals)
 deviantart-downloader username --only mature      # download only the mature works
 deviantart-downloader username --only literature mature  # ...and only the mature literature
+deviantart-downloader username --since 2024-01-01  # only works published since that date
+deviantart-downloader username --until 2023-12-31  # only works published up to that date (inclusive)
 deviantart-downloader username -q             # only results: no per-work progress lines
 deviantart-downloader username --full         # walk the entire gallery listing
 deviantart-downloader username --force-api    # route everything through the API
@@ -236,6 +241,47 @@ Galleries downloaded by earlier versions keep their existing flat layout; those 
 While it is fetching the listing or downloading, and when run in a terminal, you can steer it from the keyboard: **`p`** pauses, **`r`** resumes, and **`q`** quits (like `Ctrl+C`: it stops and cleans up, and re-running resumes where it left off). A status line pinned to the bottom of the terminal shows the available keys and the current state, and the output scrolls above it. When the output is piped or redirected, these controls are simply inactive.
 
 **A pause holds no connection open.** The files being transferred when you press `p` are let go of rather than left half-read with the socket waiting, and what is already on disk is continued with a range request when you resume — so pausing for an hour costs the same as pausing for a second, and the bytes stop arriving straight away. A connection lost mid-transfer is picked up the same way, twice, before the work counts as a failure. (Before this, a long pause ended those transfers as failures: whatever closed the idle connection first — the CDN, a laptop going to sleep — took every byte down with it.)
+
+### Narrowing a run to a date range (`--since` / `--until`)
+
+Both flags take a plain `YYYY-MM-DD`, or a full ISO 8601 timestamp when you need the precision. A value with no offset is read as UTC.
+
+```bash
+deviantart-downloader username --since 2024-01-01
+deviantart-downloader username --since 2024-01-01 --until 2024-06-30
+deviantart-downloader username --until 2019-12-31        # only the early work
+```
+
+A bare date given to `--until` means the **whole** day, so `--until 2024-06-30` includes everything published on the 30th. Read the other way the flag would silently drop almost all of the day it names.
+
+`--since` is more than a filter. Both routes list a gallery newest-first, so once a listing page is entirely older than the bound there is nothing below it worth asking for, and the walk stops there — on the API route, every page not fetched is a request not spent. `--until` cannot do the same: the works above the bound have to be walked past to reach the ones under it, so it narrows what is downloaded rather than what is listed.
+
+Two details worth knowing:
+
+- **`--full` does not defeat `--since`.** `--full` exists to override the *incremental* stop (the one that halts at the first page of already-downloaded works). A date bound is something you asked for in as many words, so it still applies; `--full --since 2024-01-01` means "walk everything back to 2024, ignoring what is already downloaded".
+- **A work whose publication date the listing does not carry is kept, not dropped.** This is the same lopsidedness `--only no-ai` has: a bound narrows the run by what the listing actually said, rather than discarding a work over a fact that was never reported. The same page also keeps the walk going, since an unknown date could be on either side of the bound.
+
+Neither flag has a `DA_*` variable on purpose. A date range is something you ask of one run, not a standing preference — left in `.env` it would quietly truncate every later sync, and the works it skipped would look like works that do not exist.
+
+#### With `--info`: who has been posting?
+
+Both flags combine with `--info`, which then adds one line to each summary:
+
+```bash
+deviantart-downloader username --info --since 2024-01-01
+deviantart-downloader --watching --info --since 2024-01-01   # ...for everyone you watch
+```
+
+```
+Galleries: 3 folder(s), 1,413 items
+  - Featured — 1,373 items
+  - Sketches — 40 items
+Published within --since 2024-01-01: 42 work(s)
+```
+
+That last line is the one figure a summary cannot read off the profile: the folder counts both routes publish are totals, with no breakdown by date, so answering it means walking the gallery listing. `--since` bounds that walk, which is what makes it affordable — a recent window costs a page or two, while `--until` on its own has to walk back to the bound.
+
+So a plain `--info` still costs the two website round trips per user it always has, and only asking for a range makes it read the listing. On the website route that is still free; under `--force-api` it is quota, and `--watching --info --since` multiplies it by the size of your watchlist.
 
 ### Replacing copies you saved blurred (`--redownload-blurred`)
 
@@ -393,7 +439,8 @@ The package is layered bottom-up, each module depending only on the ones above i
 | `controls.py` | Live keyboard controls (pause / resume / quit) during a run |
 | `listing.py` | Walking a gallery over either route, and pairing the two up |
 | `downloads.py` | Resolving a work to a file (or text) and writing it to disk |
-| `sync.py` | Orchestration: list, route, download |
+| `sync.py` | Orchestration: list, route, download; the `--only` and date filters |
+| `profile.py` | `--info`: a profile's facts, stats and galleries, over either route |
 | `overrides.py` | `_users.json`: per-user `--only` / `--literature-format`, rename-proof |
 | `cli.py` | Argument parsing and the entry point |
 
