@@ -74,6 +74,8 @@ DA_OUTPUT=~/Pictures/deviantart
 DA_FORCE_API=false
 ```
 
+`DA_WORKERS` is what `DA_WEB_WORKERS` was called before the API route got a cap of its own, and is still read when `DA_WEB_WORKERS` is unset, so an `.env` written for an older version keeps working.
+
 ## Usage
 
 ```bash
