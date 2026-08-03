@@ -19,7 +19,7 @@ Works are fetched through two routes, so the API quota is spent only on what the
 Each route saves to its own subfolder inside the gallery folder. `--force-api` restores the old behaviour of routing everything through the [official API](https://www.deviantart.com/developers/).
 
 - Downloads the original file when the author allows it, or the highest publicly available resolution image.
-- Downloads literature and journals too: text works have no media file, so their full body is saved next to the images as plain text (`.txt`) or a standalone HTML document (`.html`), your choice with `--literature-format`. The body is fetched from the website for no API quota, falling back to the listing excerpt when it is unavailable. Restrict a run with `--only`, which takes `images`, `literature`, `mature`, `ai`, `no-ai`, `upscaled` and `no-upscaled`, repeated or comma-separated, and set either flag per user in a `_users.json` that survives a rename (see below).
+- Downloads literature and journals too: text works have no media file, so their full body is saved next to the images as plain text (`.txt`) or a standalone HTML document (`.html`), your choice with `--literature-format`. The body is fetched from the website for no API quota, falling back to the listing excerpt when it is unavailable. Restrict a run with `--only`, which takes `images`, `literature`, `nsfw`, `sfw`, `ai`, `no-ai`, `upscaled` and `no-upscaled`, repeated or comma-separated, and set either flag per user in a `_users.json` that survives a rename (see below).
 - Downloads mature content unblurred when you log in with your account (`--login`, see below). Without login, `--unblur`/`DA_UNBLUR=true` strips the blur where possible: works uploaded since ~mid-2021 have their URL token pinned to the blurred version, so for those the blurred preview is downloaded instead.
 - Parallel downloads with retries and API rate-limit handling: every worker draws from one shared budget (`DA_API_RATE`, 3 requests/second by default), and a 429 holds the whole pool back instead of each thread backing off on its own. The website route needs no OAuth call at all, so a re-sync of an all-ages gallery costs zero API requests.
 - Detects duplicates across runs (even if the artwork's title has changed), so it is safe to re-run to sync new works.
@@ -63,7 +63,7 @@ DA_UNBLUR=false
 # Optional: file format for literature and journals — "txt" (plain text) or
 # "html" (a standalone document that keeps the formatting) (default: txt)
 DA_LITERATURE_FORMAT=txt
-# Optional: keep only the works matching all of images, literature, mature,
+# Optional: keep only the works matching all of images, literature, nsfw, sfw,
 # ai, no-ai, upscaled, no-upscaled (default: unset, keeps everything)
 DA_ONLY=
 # Optional: per-user --only / --literature-format file (default: _users.json in
@@ -98,8 +98,9 @@ deviantart-downloader username --redownload-blurred  # replace copies saved blur
 deviantart-downloader username --unblur       # strip the blur on mature-content previews
 deviantart-downloader username --literature-format html  # save literature/journals as .html (default: txt)
 deviantart-downloader username --only images       # download only images (skip literature/journals)
-deviantart-downloader username --only mature      # download only the mature works
-deviantart-downloader username --only literature mature  # ...and only the mature literature
+deviantart-downloader username --only nsfw        # download only the mature works
+deviantart-downloader username --only sfw         # ...or everything except those
+deviantart-downloader username --only literature nsfw  # ...or only the mature literature
 deviantart-downloader username --since 2024-01-01  # only works published since that date
 deviantart-downloader username --until 2023-12-31  # only works published up to that date (inclusive)
 deviantart-downloader username --dry-run      # say what would be fetched, fetch nothing
@@ -125,22 +126,23 @@ deviantart-downloader test -o demo     # download all 18 works into ./demo/test/
 | Axis | Selectors |
 | --- | --- |
 | What kind of work it is | `images`, `literature` |
-| Maturity | `mature` |
+| Maturity | `nsfw`, `sfw` |
 | The author's AI declaration | `ai`, `no-ai` |
 | Upscaled with AI | `upscaled`, `no-upscaled` |
 
 | Command | Keeps |
 | --- | --- |
 | `--only images` | Images, no literature or journals |
-| `--only mature` | Mature works of either kind |
-| `--only literature mature` | The mature literature only |
-| `--only=literature,mature` | The same; repeat the words or comma-separate them |
+| `--only nsfw` | Mature works of either kind |
+| `--only sfw` | Everything else |
+| `--only literature nsfw` | The mature literature only |
+| `--only=literature,nsfw` | The same; repeat the words or comma-separate them |
 | `--only images literature` | Everything — the two kinds are one axis, so naming both restricts nothing |
 | `--only no-ai` | What the site's own "Suppress AI" filter would leave |
 | `--only ai images` | The AI-made images only |
 | `--only no-ai no-upscaled` | Neither AI-made nor AI-upscaled |
 
-`mature` reads the flag the listing carries. Note that a handful of works are served blurred without carrying it, and those are not selected by it.
+`nsfw` and `sfw` read the maturity flag the listing carries, and both routes report it, so unlike the two axes below they are a true pair: between them they keep everything, and naming both restricts nothing. One caveat: a handful of works are served blurred without carrying the flag, so `nsfw` does not select them and `sfw` keeps them.
 
 The last two axes are separate declarations, not degrees of one: `ai` / `no-ai` read what the website's "Suppress AI" setting filters on (DreamUp works included), while `upscaled` / `no-upscaled` read whether the author ran the work through an AI upscaler. A hand-drawn piece upscaled that way is *not* AI-made, so `--only no-ai` keeps it and only `--only no-upscaled` turns it away.
 
@@ -186,13 +188,29 @@ So `--only images` with the file above downloads only images from `aWriter` too,
 
 One flag settles one setting: pass `--only images` and the file still picks each user's `literature-format`. The `.env` variables sit *below* the file rather than above it, because they are a standing default rather than a decision about this run — `DA_ONLY=images` with the file above still gets `aWriter`'s literature.
 
-The file is read before the first user is synced, so a typo in it stops the run there instead of halfway through a batch — including in a setting this run overrides, which is wrong today and would bite the first run that leaves the flag off:
+**A run says, in green, that it found the file and understood it**, before it fetches anything:
 
 ```
-_users.json: "someartist" asks --only for sfw, which is not among images, literature, mature, ai, no-ai, upscaled, no-upscaled.
+_users.json: read, settings for 4 user(s).
 ```
 
-Point somewhere else with `--user-config PATH` (or `DA_USER_CONFIG`); a file named that way and not found is an error, while the default location simply has nothing to say when there is no file in it.
+Worth a line of its own because silence is ambiguous: a file saved in the wrong folder, or under a name with a typo in it, is indistinguishable from one that simply has nothing to say about the users being synced, and without that line neither would print anything at all. It is progress rather than a result, so `-q` drops it.
+
+The file is read before the first user is synced, so a typo in it is heard about there instead of halfway through a batch — including in a setting this run overrides, which is wrong today and would bite the first run that leaves the flag off. **Anything wrong with it is an orange warning**, and because the file is written by hand and cannot be regenerated, the run does not decide on its own to go on without it:
+
+```
+WARNING: _users.json: "someartist" asks --only for safe, which is not among images, literature, nsfw, sfw, ai, no-ai, upscaled, no-upscaled.
+_users.json cannot be applied as written, so no user would get their own settings: every gallery would be synced with the flags this run was given.
+Carry on without it? [y/N]
+```
+
+Answering yes sets the file aside whole — nobody gets their own settings for that run, and the file itself is left exactly as it is for you to go and fix, since a run rescued this way must not write over it. Anything else stops before a single work is fetched.
+
+**With nobody there to answer** — a pipe, a cron job, CI — the question is not asked and the run stops with the message above. That is the only safe default: assuming yes would hand the decision to whoever reads the log afterwards, by which time the wrong files are already on disk, under the right names, with nothing saying so.
+
+Colour is dropped whenever the output is not going to a terminal, where the escapes would be noise sitting in a log file rather than colour, and `NO_COLOR=1` turns it off everywhere ([no-color.org](https://no-color.org)). Nothing is lost either way: every coloured line says in words what it means.
+
+Point somewhere else with `--user-config PATH` (or `DA_USER_CONFIG`); a file named that way and not found is an error — a typo on the command line, not a damaged file, so there is nothing to ask about — while the default location simply has nothing to say when there is no file in it.
 
 **A rename does not invalidate it.** DeviantArt lets people change their username, and an entry filed under a name nobody answers to any more would quietly stop applying. So each entry records the id the route reports for that user — the one thing a rename does not change — and a run that meets that id under a new name moves the entry across:
 

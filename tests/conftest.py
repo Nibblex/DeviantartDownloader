@@ -77,6 +77,23 @@ def no_downloads(monkeypatch):
     monkeypatch.setattr(listing, "fetch_gallery", forbidden)
 
 
+class FakeStream:
+    """A stand-in for stdin or stdout that is, or is not, a terminal.
+
+    `gone` is the error isatty() raises instead of answering, which is what a
+    stream already closed or detached does.
+    """
+
+    def __init__(self, terminal: bool, gone: type[Exception] | None = None):
+        self.terminal = terminal
+        self.gone = gone
+
+    def isatty(self) -> bool:
+        if self.gone:
+            raise self.gone("closed")
+        return self.terminal
+
+
 # ---------------------------------------------------------------------------
 # HTTP fakes
 # ---------------------------------------------------------------------------

@@ -1,16 +1,23 @@
 """The per-user settings file: what it sets, and surviving a rename."""
 
 import json
+import sys
 
 import pytest
 
 from deviantart_downloader import overrides as ov
-from deviantart_downloader.constants import WEB_SUBDIR
+from deviantart_downloader.constants import VERBOSE, WEB_SUBDIR
 
-from .conftest import API_USER_ID, WEB_USER_ID, make_dev
+from .conftest import API_USER_ID, WEB_USER_ID, FakeStream, make_dev
 
 WEB_WORK = {"_source": WEB_SUBDIR,
             "author": {"userid": WEB_USER_ID, "username": "artist"}}
+
+
+def answering(monkeypatch, typed):
+    """Somebody is at the terminal, and this is what they type at the question."""
+    monkeypatch.setattr(ov, "_at_a_terminal", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": typed)
 
 
 def write_file(tmp_path, entries):
@@ -40,9 +47,9 @@ class TestNoSettings:
 
 class TestSettingsApply:
     def test_only_is_replaced_for_that_user(self, tmp_path):
-        conf = load(tmp_path, {"artist": {"only": "literature, mature"}})
+        conf = load(tmp_path, {"artist": {"only": "literature, nsfw"}})
         only, fmt = conf.for_user("artist", [WEB_WORK], frozenset({"images"}), "txt")
-        assert only == frozenset({"literature", "mature"}) and fmt == "txt"
+        assert only == frozenset({"literature", "nsfw"}) and fmt == "txt"
 
     def test_the_literature_format_is_replaced_for_that_user(self, tmp_path):
         conf = load(tmp_path, {"artist": {"literature-format": "html"}})
@@ -57,7 +64,7 @@ class TestSettingsApply:
 
     def test_an_empty_only_opts_out_of_a_run_wide_filter(self, tmp_path):
         conf = load(tmp_path, {"artist": {"only": ""}})
-        only, _ = conf.for_user("artist", [WEB_WORK], frozenset({"mature"}), "txt")
+        only, _ = conf.for_user("artist", [WEB_WORK], frozenset({"nsfw"}), "txt")
         assert only == frozenset()
 
     def test_the_username_is_matched_whatever_its_case(self, tmp_path):
@@ -112,6 +119,7 @@ class TestSkip:
     def test_skip_alone_does_not_announce_an_empty_line(self, tmp_path, capsys):
         """The line names the settings it applies, and skip is not one of them."""
         conf = load(tmp_path, {"artist": {"skip": False}})
+        capsys.readouterr()          # the line loading printed, which is not this
         conf.for_user("artist", [WEB_WORK], None, "txt")
         assert ov.FILENAME not in capsys.readouterr().out
 
@@ -158,8 +166,8 @@ class TestLockedByTheCommandLine:
 
     def test_a_locked_setting_is_still_validated(self, tmp_path):
         # It is wrong today and would bite the first run without the flag.
-        with pytest.raises(SystemExit, match="asks --only for sfw"):
-            ov.UserOverrides(write_file(tmp_path, {"artist": {"only": "sfw"}}),
+        with pytest.raises(SystemExit, match="asks --only for safe"):
+            ov.UserOverrides(write_file(tmp_path, {"artist": {"only": "safe"}}),
                              frozenset({ov.ONLY}))
 
     def test_shadowed_names_what_the_file_loses(self, tmp_path):
@@ -251,11 +259,44 @@ class TestRename:
         assert "other" in read_back(tmp_path)
 
 
+class TestReadingItIsAnnounced:
+    def test_a_file_that_was_understood_says_so(self, tmp_path, capsys):
+        load(tmp_path, {"artist": {"only": "images"}, "aWriter": {"skip": True}})
+        assert (f"{ov.FILENAME}: read, settings for 2 user(s)."
+                in capsys.readouterr().out)
+
+    def test_a_file_with_nothing_in_it_yet_still_says_so(self, tmp_path, capsys):
+        # Empty is not broken: somebody has made the file and not filled it in.
+        load(tmp_path, {})
+        assert "no settings in it yet" in capsys.readouterr().out
+
+    def test_no_file_at_all_says_nothing(self, tmp_path, capsys):
+        ov.UserOverrides(tmp_path / ov.FILENAME)
+        assert capsys.readouterr().out == ""
+
+    def test_the_line_is_the_green_one(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setattr(ov, "green", lambda text: f"<green>{text}")
+        load(tmp_path, {"artist": {"only": "images"}})
+        assert "<green>" in capsys.readouterr().out
+
+    def test_a_quiet_run_drops_it(self, tmp_path, capsys):
+        # Progress, not a result: -q wants what happened to the galleries, and
+        # a settings file being read as intended is what was supposed to happen.
+        VERBOSE.clear()
+        load(tmp_path, {"artist": {"only": "images"}})
+        assert capsys.readouterr().out == ""
+
+
 class TestBadFile:
     def test_damaged_json_stops_the_run(self, tmp_path):
         (tmp_path / ov.FILENAME).write_text("{not json", encoding="utf-8")
         with pytest.raises(SystemExit, match="Could not read the per-user settings"):
             ov.UserOverrides(tmp_path / ov.FILENAME)
+
+    def test_nothing_broken_is_reported_as_read(self, tmp_path, capsys):
+        with pytest.raises(SystemExit):
+            load(tmp_path, {"artist": {"only": "safe"}})
+        assert "read" not in capsys.readouterr().out
 
     def test_a_list_instead_of_an_object_stops_the_run(self, tmp_path):
         with pytest.raises(SystemExit, match="one group of settings per username"):
@@ -270,8 +311,8 @@ class TestBadFile:
             load(tmp_path, {"artist": {"unblur": True}})
 
     def test_an_unknown_selector_is_named(self, tmp_path):
-        with pytest.raises(SystemExit, match="asks --only for sfw"):
-            load(tmp_path, {"artist": {"only": "images, sfw"}})
+        with pytest.raises(SystemExit, match="asks --only for safe"):
+            load(tmp_path, {"artist": {"only": "images, safe"}})
 
     def test_an_impossible_literature_format_is_named(self, tmp_path):
         with pytest.raises(SystemExit, match="asks --literature-format"):
@@ -280,9 +321,88 @@ class TestBadFile:
     def test_every_entry_is_checked_up_front(self, tmp_path):
         # Not just the user this run happens to reach: a typo left for weeks
         # would be found only once that user's turn came.
-        with pytest.raises(SystemExit, match="asks --only for sfw"):
+        with pytest.raises(SystemExit, match="asks --only for safe"):
             load(tmp_path, {"artist": {"only": "images"},
-                            "later": {"only": "sfw"}})
+                            "later": {"only": "safe"}})
+
+
+class TestBadFileAtATerminal:
+    """Somebody watching may decide a sync with the typed flags beats none."""
+
+    def test_the_problem_is_put_in_front_of_them_first(self, tmp_path, monkeypatch,
+                                                       capsys):
+        answering(monkeypatch, "y")
+        load(tmp_path, {"artist": {"only": "safe"}})
+        out = capsys.readouterr().out
+        assert "WARNING" in out and "asks --only for safe" in out
+        assert "no user would get their own settings" in out
+
+    def test_the_warning_is_the_orange_one(self, tmp_path, monkeypatch, capsys):
+        answering(monkeypatch, "y")
+        monkeypatch.setattr(ov, "orange", lambda text: f"<orange>{text}")
+        load(tmp_path, {"artist": {"only": "safe"}})
+        assert "<orange>" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("typed", ["y", "yes", "  YES  "])
+    def test_a_yes_carries_on_with_nobody_configured(self, tmp_path, monkeypatch,
+                                                     typed):
+        answering(monkeypatch, typed)
+        conf = load(tmp_path, {"artist": {"only": "safe"}})
+        # Not the entry that could not be read, and not a half of it either:
+        # the file is set aside whole, so every user gets the typed flags.
+        assert conf.for_user("artist", [WEB_WORK], None, "txt") == (None, "txt")
+        assert conf.skips("artist") is False
+        assert conf.shadowed() == frozenset()
+
+    @pytest.mark.parametrize("typed", ["n", "", "later", "Y E S"])
+    def test_anything_short_of_a_yes_stops_the_run(self, tmp_path, monkeypatch, typed):
+        answering(monkeypatch, typed)
+        with pytest.raises(SystemExit, match="Stopped"):
+            load(tmp_path, {"artist": {"only": "safe"}})
+
+    def test_stdin_closing_mid_question_stops_the_run(self, tmp_path, monkeypatch):
+        def closed(prompt=""):
+            raise EOFError
+
+        monkeypatch.setattr(ov, "_at_a_terminal", lambda: True)
+        monkeypatch.setattr("builtins.input", closed)
+        with pytest.raises(SystemExit, match="Stopped"):
+            load(tmp_path, {"artist": {"only": "safe"}})
+
+    def test_carrying_on_leaves_the_file_exactly_as_it_was(self, tmp_path, monkeypatch):
+        # The one thing a rescued run must not do is write over the file its
+        # owner still has to go and fix.
+        path = tmp_path / ov.FILENAME
+        path.write_text("{not json", encoding="utf-8")
+        answering(monkeypatch, "y")
+        conf = ov.UserOverrides(path)
+        conf.for_user("artist", [WEB_WORK], None, "txt")
+        assert path.read_text(encoding="utf-8") == "{not json"
+
+    def test_with_nobody_there_it_stops_without_asking(self, tmp_path, monkeypatch):
+        # A pipe, a cron job, CI: assuming yes would hand the decision to
+        # whoever reads the log afterwards, which is too late for a decision.
+        asked = []
+        monkeypatch.setattr("builtins.input", lambda prompt="": asked.append(prompt))
+        monkeypatch.setattr(ov, "_at_a_terminal", lambda: False)
+        with pytest.raises(SystemExit, match="asks --only for safe"):
+            load(tmp_path, {"artist": {"only": "safe"}})
+        assert asked == []
+
+
+class TestAtATerminal:
+    def test_a_pipe_is_nobody(self, monkeypatch):
+        monkeypatch.setattr(sys, "stdin", FakeStream(False))
+        assert ov._at_a_terminal() is False
+
+    def test_a_terminal_is_somebody(self, monkeypatch):
+        monkeypatch.setattr(sys, "stdin", FakeStream(True))
+        assert ov._at_a_terminal() is True
+
+    @pytest.mark.parametrize("gone", [ValueError, OSError])
+    def test_a_stdin_already_closed_is_nobody(self, monkeypatch, gone):
+        monkeypatch.setattr(sys, "stdin", FakeStream(True, gone))
+        assert ov._at_a_terminal() is False
 
 
 class TestLoadOverrides:

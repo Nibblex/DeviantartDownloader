@@ -59,7 +59,11 @@ class Axis(NamedTuple):
 
 AXES = (
     Axis(("images", "literature"), lambda dev: not is_text_work(dev)),
-    Axis(("mature",), lambda dev: bool(dev.get("is_mature"))),
+    # The maturity flag DeviantArt puts on a work, under the two words people
+    # reach for. Both routes report it, so unlike the two axes below this one
+    # is symmetric: "sfw" keeps what the listing says is not mature, rather
+    # than what it merely failed to mention.
+    Axis(("nsfw", "sfw"), lambda dev: bool(dev.get("is_mature"))),
     # These two ride on the website listing alone, and the API has no
     # equivalent, so their flag is None -- not known -- on that route.
     Axis(("ai", "no-ai"), lambda dev: dev.get("is_ai_generated") is True,
@@ -185,9 +189,10 @@ def filter_by_content(deviations: list[dict],
     The selectors sit on the axes of AXES, so they combine the way filters
     usually do: a union within an axis, an intersection across them. "images"
     and "literature" are the two values of what kind of work it is, so naming
-    both is the same as naming neither, while "mature" is a separate axis and
-    narrows whatever the kind left. That is what makes `--only literature mature`
-    mean the mature literature rather than everything that is either.
+    both is the same as naming neither, while "nsfw" and "sfw" are a separate
+    axis and narrow whatever the kind left. That is what makes
+    `--only literature nsfw` mean the mature literature rather than everything
+    that is either.
 
     On the two axes only the website reports, a work whose flag never arrived
     reads as False, which makes the selectors deliberately lopsided: "ai" asks
