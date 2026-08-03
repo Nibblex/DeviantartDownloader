@@ -617,8 +617,8 @@ class TestPerUserSettings:
             self, clean_cli_env, monkeypatch):
         self.gallery(monkeypatch)
         out = clean_cli_env / "out"
-        self.settings(out, {"artist": {"only": "sfw"}})
-        with pytest.raises(SystemExit, match="asks --only for sfw"):
+        self.settings(out, {"artist": {"only": "safe"}})
+        with pytest.raises(SystemExit, match="asks --only for safe"):
             self.run(monkeypatch, out)
         assert not (out / "artist").exists()
 

@@ -47,9 +47,9 @@ class TestNoSettings:
 
 class TestSettingsApply:
     def test_only_is_replaced_for_that_user(self, tmp_path):
-        conf = load(tmp_path, {"artist": {"only": "literature, mature"}})
+        conf = load(tmp_path, {"artist": {"only": "literature, nsfw"}})
         only, fmt = conf.for_user("artist", [WEB_WORK], frozenset({"images"}), "txt")
-        assert only == frozenset({"literature", "mature"}) and fmt == "txt"
+        assert only == frozenset({"literature", "nsfw"}) and fmt == "txt"
 
     def test_the_literature_format_is_replaced_for_that_user(self, tmp_path):
         conf = load(tmp_path, {"artist": {"literature-format": "html"}})
@@ -64,7 +64,7 @@ class TestSettingsApply:
 
     def test_an_empty_only_opts_out_of_a_run_wide_filter(self, tmp_path):
         conf = load(tmp_path, {"artist": {"only": ""}})
-        only, _ = conf.for_user("artist", [WEB_WORK], frozenset({"mature"}), "txt")
+        only, _ = conf.for_user("artist", [WEB_WORK], frozenset({"nsfw"}), "txt")
         assert only == frozenset()
 
     def test_the_username_is_matched_whatever_its_case(self, tmp_path):
@@ -166,8 +166,8 @@ class TestLockedByTheCommandLine:
 
     def test_a_locked_setting_is_still_validated(self, tmp_path):
         # It is wrong today and would bite the first run without the flag.
-        with pytest.raises(SystemExit, match="asks --only for sfw"):
-            ov.UserOverrides(write_file(tmp_path, {"artist": {"only": "sfw"}}),
+        with pytest.raises(SystemExit, match="asks --only for safe"):
+            ov.UserOverrides(write_file(tmp_path, {"artist": {"only": "safe"}}),
                              frozenset({ov.ONLY}))
 
     def test_shadowed_names_what_the_file_loses(self, tmp_path):
@@ -311,8 +311,8 @@ class TestBadFile:
             load(tmp_path, {"artist": {"unblur": True}})
 
     def test_an_unknown_selector_is_named(self, tmp_path):
-        with pytest.raises(SystemExit, match="asks --only for sfw"):
-            load(tmp_path, {"artist": {"only": "images, sfw"}})
+        with pytest.raises(SystemExit, match="asks --only for safe"):
+            load(tmp_path, {"artist": {"only": "images, safe"}})
 
     def test_an_impossible_literature_format_is_named(self, tmp_path):
         with pytest.raises(SystemExit, match="asks --literature-format"):
@@ -321,9 +321,9 @@ class TestBadFile:
     def test_every_entry_is_checked_up_front(self, tmp_path):
         # Not just the user this run happens to reach: a typo left for weeks
         # would be found only once that user's turn came.
-        with pytest.raises(SystemExit, match="asks --only for sfw"):
+        with pytest.raises(SystemExit, match="asks --only for safe"):
             load(tmp_path, {"artist": {"only": "images"},
-                            "later": {"only": "sfw"}})
+                            "later": {"only": "safe"}})
 
 
 class TestBadFileAtATerminal:

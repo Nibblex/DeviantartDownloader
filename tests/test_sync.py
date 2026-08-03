@@ -57,21 +57,39 @@ class TestOnlySelectors:
         kept, _ = sync.filter_by_content(self.ALL, frozenset(selectors))
         return kept
 
-    def test_mature_is_its_own_axis(self):
-        assert self.keep("mature") == [self.MAT_IMG, self.MAT_LIT]
+    def test_maturity_is_its_own_axis(self):
+        assert self.keep("nsfw") == [self.MAT_IMG, self.MAT_LIT]
 
-    def test_a_kind_and_mature_intersect(self):
+    def test_sfw_is_the_other_half_of_it(self):
+        # Both routes report the flag, so this axis is symmetric: what is left
+        # is what the listing said is not mature, not what it never mentioned.
+        assert self.keep("sfw") == [self.IMG, self.LIT]
+
+    def test_naming_both_maturities_is_the_same_as_naming_neither(self):
+        assert self.keep("nsfw", "sfw") == self.ALL
+
+    def test_a_kind_and_a_maturity_intersect(self):
         # The point of combining: the mature literature, not everything that is
         # either mature or literature.
-        assert self.keep("literature", "mature") == [self.MAT_LIT]
-        assert self.keep("images", "mature") == [self.MAT_IMG]
+        assert self.keep("literature", "nsfw") == [self.MAT_LIT]
+        assert self.keep("images", "nsfw") == [self.MAT_IMG]
+        assert self.keep("literature", "sfw") == [self.LIT]
 
     def test_naming_both_kinds_is_the_same_as_naming_neither(self):
         assert self.keep("images", "literature") == self.ALL
 
     def test_both_kinds_still_leave_the_other_axis_working(self):
-        assert self.keep("images", "literature", "mature") == [self.MAT_IMG,
-                                                               self.MAT_LIT]
+        assert self.keep("images", "literature", "nsfw") == [self.MAT_IMG,
+                                                             self.MAT_LIT]
+
+    def test_a_work_the_listing_said_nothing_about_reads_as_sfw(self):
+        # Worth pinning rather than leaving implicit: a work carrying no
+        # maturity flag at all is kept by sfw and dropped by nsfw.
+        silent = {"content": {"src": "x"}}
+        kept, _ = sync.filter_by_content([silent], frozenset({"sfw"}))
+        assert kept == [silent]
+        kept, _ = sync.filter_by_content([silent], frozenset({"nsfw"}))
+        assert kept == []
 
     def test_a_bare_string_is_not_read_as_its_letters(self):
         # frozenset("images") would be a set of characters and filter nothing.
@@ -83,8 +101,8 @@ class TestAxes:
     """The table the selectors come from, rather than each axis in turn."""
 
     def test_every_axis_value_is_a_selector(self):
-        assert sync.ONLY_FILTERS == ("images", "literature", "mature", "ai",
-                                     "no-ai", "upscaled", "no-upscaled")
+        assert sync.ONLY_FILTERS == ("images", "literature", "nsfw", "sfw",
+                                     "ai", "no-ai", "upscaled", "no-upscaled")
 
     def test_no_selector_belongs_to_two_axes(self):
         # A word on two axes would be filtered twice and read as neither.
@@ -186,7 +204,7 @@ class TestUnreportedWarnings:
 
     @pytest.mark.parametrize("only", [
         None,                                    # no --only at all
-        frozenset({"mature"}),                   # an axis both routes report
+        frozenset({"nsfw"}),                     # an axis both routes report
         frozenset({"ai", "no-ai"}),              # both values: filters nothing
     ])
     def test_nothing_to_warn_about(self, only):
@@ -195,9 +213,9 @@ class TestUnreportedWarnings:
 
 class TestParseOnly:
     def test_repeated_words_and_commas_both_work(self):
-        for given in (["literature", "mature"], ["literature,mature"],
-                      ["literature, mature"], ["LITERATURE", "Mature"]):
-            assert sync.parse_only(given) == frozenset({"literature", "mature"})
+        for given in (["literature", "nsfw"], ["literature,nsfw"],
+                      ["literature, nsfw"], ["LITERATURE", "NSFW"]):
+            assert sync.parse_only(given) == frozenset({"literature", "nsfw"})
 
     def test_nothing_selected_is_no_filter(self):
         assert sync.parse_only([""]) == frozenset()
@@ -207,8 +225,8 @@ class TestParseOnly:
         assert sync.parse_only(["no-ai,images"]) == frozenset({"no-ai", "images"})
 
     def test_an_unknown_selector_is_rejected_by_name(self):
-        with pytest.raises(SystemExit, match="not: sfw"):
-            sync.parse_only(["images", "sfw"])
+        with pytest.raises(SystemExit, match="not: safe"):
+            sync.parse_only(["images", "safe"])
 
     def test_a_profile_written_behind_only_explains_itself(self):
         """--only reads every word after it, so `--only images artist` lands here."""
