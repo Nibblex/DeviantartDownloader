@@ -1,5 +1,7 @@
 """Endpoints, limits and the flags every other module shares."""
 
+import os
+import sys
 import threading
 from pathlib import Path
 
@@ -67,6 +69,54 @@ def say(*args, **kwargs) -> None:
     """print() for progress chatter: silent once -q/--quiet has been passed."""
     if VERBOSE.is_set():
         print(*args, **kwargs)
+
+
+# Green for something found and usable, orange for something that is there but
+# cannot be used as written. Orange is picked out of the 256-colour palette
+# rather than taken from the eight basic ones, where the nearest is the yellow
+# half the themes in existence render as brown.
+GREEN = "\x1b[32m"
+ORANGE = "\x1b[38;5;208m"
+RESET = "\x1b[0m"
+
+
+def _paint(text: str, colour: str, stream) -> str:
+    """`text` in `colour`, or exactly as it came when nothing can show colour.
+
+    Colour is never the only thing a line has to say for itself: every line
+    that carries it also says in words what it means, so the text is worth no
+    less plain. That is what makes it safe to drop, and it is dropped whenever
+    the output is not going to a terminal -- redirected into a file or piped
+    into another program the escapes would be noise sitting in the middle of
+    the text. NO_COLOR (https://no-color.org) is obeyed for the same reason:
+    somebody who has asked for no colour anywhere loses nothing by getting none
+    here either.
+
+    Both questions are asked per call rather than once at import, because
+    neither answer holds still: stdout is swapped for the footer writer while a
+    run is going (see controls.py), and a test may capture output long after
+    this module was first imported. Which is also why the stream defaults here
+    rather than in a signature, where sys.stdout would be bound at import.
+    """
+    out = stream or sys.stdout
+    if os.environ.get("NO_COLOR"):
+        return text
+    try:
+        if not out.isatty():
+            return text
+    except (ValueError, OSError):     # a stream already closed or detached
+        return text
+    return f"{colour}{text}{RESET}"
+
+
+def green(text: str, stream=None) -> str:
+    """Paint something that is in place and was understood."""
+    return _paint(text, GREEN, stream)
+
+
+def orange(text: str, stream=None) -> str:
+    """Paint something that is there but not usable, and wants looking at."""
+    return _paint(text, ORANGE, stream)
 
 
 def sleep_or_cancel(seconds: float) -> None:

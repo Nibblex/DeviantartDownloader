@@ -186,13 +186,29 @@ So `--only images` with the file above downloads only images from `aWriter` too,
 
 One flag settles one setting: pass `--only images` and the file still picks each user's `literature-format`. The `.env` variables sit *below* the file rather than above it, because they are a standing default rather than a decision about this run — `DA_ONLY=images` with the file above still gets `aWriter`'s literature.
 
-The file is read before the first user is synced, so a typo in it stops the run there instead of halfway through a batch — including in a setting this run overrides, which is wrong today and would bite the first run that leaves the flag off:
+**A run says, in green, that it found the file and understood it**, before it fetches anything:
 
 ```
-_users.json: "someartist" asks --only for sfw, which is not among images, literature, mature, ai, no-ai, upscaled, no-upscaled.
+_users.json: read, settings for 4 user(s).
 ```
 
-Point somewhere else with `--user-config PATH` (or `DA_USER_CONFIG`); a file named that way and not found is an error, while the default location simply has nothing to say when there is no file in it.
+Worth a line of its own because silence is ambiguous: a file saved in the wrong folder, or under a name with a typo in it, is indistinguishable from one that simply has nothing to say about the users being synced, and without that line neither would print anything at all. It is progress rather than a result, so `-q` drops it.
+
+The file is read before the first user is synced, so a typo in it is heard about there instead of halfway through a batch — including in a setting this run overrides, which is wrong today and would bite the first run that leaves the flag off. **Anything wrong with it is an orange warning**, and because the file is written by hand and cannot be regenerated, the run does not decide on its own to go on without it:
+
+```
+WARNING: _users.json: "someartist" asks --only for sfw, which is not among images, literature, mature, ai, no-ai, upscaled, no-upscaled.
+_users.json cannot be applied as written, so no user would get their own settings: every gallery would be synced with the flags this run was given.
+Carry on without it? [y/N]
+```
+
+Answering yes sets the file aside whole — nobody gets their own settings for that run, and the file itself is left exactly as it is for you to go and fix, since a run rescued this way must not write over it. Anything else stops before a single work is fetched.
+
+**With nobody there to answer** — a pipe, a cron job, CI — the question is not asked and the run stops with the message above. That is the only safe default: assuming yes would hand the decision to whoever reads the log afterwards, by which time the wrong files are already on disk, under the right names, with nothing saying so.
+
+Colour is dropped whenever the output is not going to a terminal, where the escapes would be noise sitting in a log file rather than colour, and `NO_COLOR=1` turns it off everywhere ([no-color.org](https://no-color.org)). Nothing is lost either way: every coloured line says in words what it means.
+
+Point somewhere else with `--user-config PATH` (or `DA_USER_CONFIG`); a file named that way and not found is an error — a typo on the command line, not a damaged file, so there is nothing to ask about — while the default location simply has nothing to say when there is no file in it.
 
 **A rename does not invalidate it.** DeviantArt lets people change their username, and an entry filed under a name nobody answers to any more would quietly stop applying. So each entry records the id the route reports for that user — the one thing a rename does not change — and a run that meets that id under a new name moves the entry across:
 

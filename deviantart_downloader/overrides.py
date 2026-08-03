@@ -22,7 +22,7 @@ import json
 import sys
 from pathlib import Path
 
-from .constants import TEXT_FORMATS, say
+from .constants import TEXT_FORMATS, green, orange, say
 from .naming import user_ids
 from .storage import write_json
 from .sync import ONLY_FILTERS, parse_selectors
@@ -40,6 +40,17 @@ FORMAT = "literature-format"
 SKIP = "skip"
 # Written by the tool rather than by hand: what a rename is recognised by.
 IDS = "ids"
+
+
+class Unusable(SystemExit):
+    """A settings file that cannot be applied as it stands.
+
+    A SystemExit because ending the run carrying its own message is what it
+    means everywhere nobody catches it -- including the checks below that run
+    long after loading, when there is no longer any point in asking anything.
+    Loading catches it, because loading is the one moment there is still
+    somebody to ask whether to go on without the file.
+    """
 
 
 def load_overrides(path: str | None, output_root: Path,
@@ -66,6 +77,10 @@ class UserOverrides:
     later, when the turn of the user it was written for finally comes. That
     holds for a setting `locked` by the command line too -- it is wrong today
     and would bite the first run that leaves the flag off.
+
+    Loading is also the only thing that says out loud whether there is a file
+    at all and whether it made sense of it, which is why both outcomes are
+    reported here rather than left for the first user to reveal.
     """
 
     def __init__(self, path: Path, locked: frozenset[str] = frozenset(),
@@ -75,9 +90,14 @@ class UserOverrides:
         # What a run that promises to write nothing sets: the file is still
         # read and still applied, it is just never learned from.
         self.read_only = read_only
-        self._entries = _read(path)
-        for username, entry in self._entries.items():
-            _settings(entry, username, path)
+        try:
+            self._entries = _read(path)
+            for username, entry in self._entries.items():
+                _settings(entry, username, path)
+        except Unusable as problem:
+            self._entries = _carry_on_without(problem, path)
+        else:
+            _found(path, self._entries)
 
     def for_user(self, username: str, deviations: list[dict],
                  only: frozenset[str] | None,
@@ -196,26 +216,89 @@ class UserOverrides:
                   "rename may have to be followed by hand.")
 
 
+def _found(path: Path, entries: dict) -> None:
+    """Say that there is a settings file and that it was understood.
+
+    Worth a line of its own because silence is ambiguous: a file saved in the
+    wrong folder, or under a name with a typo in it, is indistinguishable from
+    one that simply has nothing to say about the users being synced, and
+    neither would print anything at all. Green answers the question somebody
+    who has just written one is asking.
+
+    Progress rather than a result, so -q drops it: a quiet run wants what
+    happened to the galleries, and a file being read as intended is what was
+    supposed to happen.
+    """
+    if not path.is_file():
+        return
+    if entries:
+        line = f"  {path.name}: read, settings for {len(entries)} user(s)."
+    else:
+        line = f"  {path.name}: read, though it has no settings in it yet."
+    say(green(line))
+
+
+def _carry_on_without(problem: Unusable, path: Path) -> dict:
+    """The entries to go on with when there are none, having said why -- or stop.
+
+    Going on regardless is the one thing this must never decide on its own.
+    The file names users and says what to fetch for each of them, so a run that
+    quietly set it aside would download the wrong things under the right names
+    and never mention it -- and unlike the download record it is written by
+    hand, so there is nothing to regenerate it from once the wrong files are on
+    disk. Somebody sitting at the terminal may still judge that a sync with the
+    flags they typed beats no sync at all, and that is the whole of what the
+    question is for.
+
+    With nobody there to ask -- a pipe, a cron job, CI -- the answer is to
+    stop, and let the message say what is wrong with the file. Assuming yes
+    there would hand the decision to whoever reads the log afterwards, which is
+    too late for it to be a decision.
+    """
+    if not _at_a_terminal():
+        raise problem
+    print(orange(f"  WARNING: {problem.code}"))
+    print(orange(f"  {path.name} cannot be applied as written, so no user would "
+                 "get their own settings: every gallery would be synced with "
+                 "the flags this run was given."))
+    try:
+        answer = input("  Carry on without it? [y/N] ").strip().lower()
+    except (EOFError, ValueError):    # stdin closed while the question stood
+        answer = ""
+    if answer not in ("y", "yes"):
+        sys.exit("Stopped. Nothing was fetched and nothing was written.")
+    return {}
+
+
+def _at_a_terminal() -> bool:
+    """Whether there is somebody who could answer a question."""
+    try:
+        return sys.stdin.isatty()
+    except (ValueError, OSError):     # stdin closed or detached
+        return False
+
+
 def _read(path: Path) -> dict[str, dict]:
     """The file's entries, or none at all when there is no file.
 
     Unlike the download record, this file is written by hand and cannot be
-    regenerated, so anything wrong with it ends the run: ignoring it and
-    carrying on would sync every user it names with the wrong settings and say
-    nothing about it.
+    regenerated, so anything wrong with it stops the run rather than being
+    ignored: carrying on would sync every user it names with the wrong settings
+    and say nothing about it. Only somebody at the terminal, asked outright by
+    _carry_on_without(), can decide otherwise.
     """
     if not path.is_file():
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        sys.exit(f"Could not read the per-user settings in {path}: {e}")
+        raise Unusable(f"Could not read the per-user settings in {path}: {e}")
     if not isinstance(data, dict):
-        sys.exit(f"{path} must hold one group of settings per username.")
+        raise Unusable(f"{path} must hold one group of settings per username.")
     for username, entry in data.items():
         if not isinstance(entry, dict):
-            sys.exit(f'{path}: "{username}" must name a group of settings, not '
-                     f"a {type(entry).__name__}.")
+            raise Unusable(f'{path}: "{username}" must name a group of settings, not '
+                           f"a {type(entry).__name__}.")
     return data
 
 
@@ -223,7 +306,7 @@ def _settings(entry: dict, username: str, path: Path) -> dict:
     """One entry's settings, parsed and validated.
 
     Keys are read as the flags they stand for, give or take the dash or
-    underscore. Anything unusable ends the run naming both the user and the
+    underscore. Anything unusable stops the run naming both the user and the
     problem: a typo that was skipped instead would download the wrong thing and
     only be noticed once the wrong files were on disk.
     """
@@ -233,8 +316,8 @@ def _settings(entry: dict, username: str, path: Path) -> dict:
         if key == IDS:
             continue
         if key not in SETTINGS:
-            sys.exit(f'{path}: "{username}" sets "{written}", which is not a '
-                     f"per-user setting. Accepted: {', '.join(SETTINGS)}.")
+            raise Unusable(f'{path}: "{username}" sets "{written}", which is not a '
+                           f"per-user setting. Accepted: {', '.join(SETTINGS)}.")
         out[key] = SETTINGS[key](value, username, path)
     return out
 
@@ -248,8 +331,8 @@ def _only(value, username: str, path: Path) -> frozenset[str]:
     """
     chosen, unknown = parse_selectors(value if isinstance(value, list) else [value])
     if unknown:
-        sys.exit(f'{path}: "{username}" asks --only for {", ".join(unknown)}, '
-                 f"which is not among {', '.join(ONLY_FILTERS)}.")
+        raise Unusable(f'{path}: "{username}" asks --only for {", ".join(unknown)}, '
+                       f"which is not among {', '.join(ONLY_FILTERS)}.")
     return chosen
 
 
@@ -257,8 +340,8 @@ def _format(value, username: str, path: Path) -> str:
     """An entry's literature format, which is one of the two --literature-format takes."""
     chosen = str(value).strip().lower()
     if chosen not in TEXT_FORMATS:
-        sys.exit(f'{path}: "{username}" asks --literature-format for {value!r}, '
-                 f"which must be one of {', '.join(TEXT_FORMATS)}.")
+        raise Unusable(f'{path}: "{username}" asks --literature-format for {value!r}, '
+                       f"which must be one of {', '.join(TEXT_FORMATS)}.")
     return chosen
 
 
@@ -276,8 +359,8 @@ def _skip(value, username: str, path: Path) -> bool:
         return True
     if text in ("0", "false", "no", "off"):
         return False
-    sys.exit(f'{path}: "{username}" asks skip for {value!r}, which must be '
-             "true or false.")
+    raise Unusable(f'{path}: "{username}" asks skip for {value!r}, which must be '
+                   "true or false.")
 
 
 # What an entry may set, and how each value is read. A setting is a row here
